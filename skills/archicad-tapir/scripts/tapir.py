@@ -415,7 +415,8 @@ def outline(value):
 
 
 def main(args):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # names are rarely ASCII, consoles rarely UTF-8
+    for stream in (sys.stdout, sys.stderr):                         # names are rarely ASCII, consoles rarely UTF-8
+        stream.reconfigure(encoding="utf-8", errors="replace")
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         return 0
