@@ -1,0 +1,20 @@
+{
+  "name": "archicad-tapir-skill",
+  "owner": {
+    "name": "Garygaoxiang"
+  },
+  "metadata": {
+    "description": "Drive and verify a running Archicad from coding agents through the Tapir add-on"
+  },
+  "plugins": [
+    {
+      "name": "archicad-tapir",
+      "description": "Check the Archicad setup, install Tapir, run Tapir / Archicad / add-on JSON commands, and verify the model during add-on development",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/archicad-tapir"
+      ]
+    }
+  ]
+}
