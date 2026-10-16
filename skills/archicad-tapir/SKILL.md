@@ -83,14 +83,15 @@ the previous result is still there - a project that was not saved has lost it.
 Archicad keeps every add-on it loaded locked, so building a new `.apx` (or updating Tapir) needs it closed:
 
 ```
-tapir.py quit             # Archicad's own quit; prints the command that reopens the same project
+tapir.py quit             # no save, no question; prints the command that reopens the same project
 <build the add-on>
 tapir.py open "C:\Projects\test.pln" --exe "C:\Program Files\GRAPHISOFT\Archicad 28\Archicad.exe"
 tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
 ```
 
-- `quit` asks about unsaved changes like the menu does and waits for the answer. Ask the user before quitting unless
-  they told you to; never save their project on your own.
+- `quit` closes Archicad **without saving, and does not ask**: unsaved changes are lost. Ask the user before quitting
+  unless they told you to; to keep their changes they save first (or tell you to `call SaveProject`) - never save
+  their project on your own.
 - One Archicad at a time: each further one takes the next port (19724, ...; `--port`) and a lot of memory. `open`
   refuses while another one runs; to switch projects inside a running Archicad, `call OpenProject projectFilePath=...`.
 - When `open` keeps waiting, a dialog is waiting on screen: project recovery after a crash (Cancel keeps the recovery

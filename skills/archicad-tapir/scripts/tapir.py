@@ -6,7 +6,7 @@
                                         (--versions 28   --dryRun   --uninstall   --addOnsFolder DIR)
   tapir.py help [Command|Definition]    the commands of the Tapir version Archicad runs, or one command's schema
   tapir.py call Command [params]        run a Tapir command; API.Name runs a built-in one, Namespace/Name an add-on's
-  tapir.py quit                         quit Archicad (it asks about unsaved changes) and wait until it is gone
+  tapir.py quit                         quit Archicad WITHOUT saving (it does not ask) and wait until it is gone
   tapir.py open PROJECT [--exe PATH]    start Archicad on a project and wait until it answers for it
   tapir.py dbwin                        Windows: print OutputDebugString lines (C++ add-on logs) until stopped
 
@@ -168,7 +168,8 @@ def doctor(port):
         report(True, "%s, Tapir %s, project %s" % (name, version, where))
         ready = True
         if latest and numbers(version) < numbers(latest):
-            report(None, "Tapir %s is out: quit Archicad (tapir.py quit), tapir.py install, start it again" % latest)
+            report(None, "Tapir %s is out: save, quit Archicad (tapir.py quit does not save), tapir.py install, start it again"
+                   % latest)
     if not ports:
         report(False, "no Archicad listens on ports %d-%d: start Archicad and open a project, or tapir.py open <project>"
                % (PORTS[0], PORTS[-1]))
@@ -183,7 +184,8 @@ def install(options):
     print(done.stdout + done.stderr, end="")
     if done.returncode and WINDOWS and "Permission denied" in done.stdout + done.stderr:
         if archicads():
-            print("Archicad is running and locks the add-ons it loaded: quit it (tapir.py quit), then install again.")
+            print("Archicad is running and locks the add-ons it loaded: save, quit it (tapir.py quit does not save),"
+                  " then install again.")
         else:
             print("The Add-Ons folder needs administrator rights: retrying elevated - click Yes on the Windows prompt.")
             return as_admin(command)
@@ -302,7 +304,8 @@ def quit_archicad(port, wait):
             print("Archicad quit." + reopen)
             return 0
         time.sleep(1)
-    print("Archicad still runs after %d s - it is probably asking whether to save; the user has to answer it." % wait + reopen)
+    print("Archicad still runs after %d s: a dialog may wait on screen, or it hangs on its way out - then end it in the"
+          " Task Manager (its next start offers project recovery)." % wait + reopen)
     return 1
 
 
