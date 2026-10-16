@@ -34,6 +34,7 @@ INSTALLER = "archicad-addon/Installer/tapir_installer.py"
 PORTS = range(19723, 19745)                    # each Archicad takes the first free one
 PORT = int(os.environ.get("ARCHICAD_PORT", "19723"))
 WINDOWS = sys.platform == "win32"
+LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # a system proxy must not get 127.0.0.1
 
 
 def call(command, params=None, port=PORT, timeout=600):
@@ -50,7 +51,7 @@ def call(command, params=None, port=PORT, timeout=600):
             "addOnCommandParameters": params or {}}}
     request = urllib.request.Request("http://127.0.0.1:%d" % port, json.dumps(body).encode("utf-8"),
                                      {"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with LOCAL.open(request, timeout=timeout) as response:
         reply = json.loads(response.read().decode("utf-8"))
     if not reply.get("succeeded"):
         raise RuntimeError("%s: %s" % (command, json.dumps(reply.get("error"), ensure_ascii=False)))

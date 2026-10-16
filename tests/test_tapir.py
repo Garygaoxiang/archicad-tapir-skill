@@ -7,6 +7,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills", "archicad-tapir", "scripts"))
+os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"        # a proxy that would swallow every call that used it
+for name in ("NO_PROXY", "no_proxy"):
+    os.environ.pop(name, None)
 import tapir  # noqa: E402
 
 REPLIES = {
