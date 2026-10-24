@@ -293,7 +293,8 @@ def doctor(port):
             elif refuses(e):
                 report(False, "%s: " % name + REFUSES % (e, shows()))
             else:
-                report(False, "%s, Tapir not loaded (%s): tapir.py install, then restart Archicad" % (name, e))
+                report(False, "%s, Tapir not loaded (%s): tapir.py install, then the user restarts Archicad (tapir.py"
+                              " quit needs Tapir loaded)" % (name, e))
             continue
         except Exception:
             report(False, "%s is busy - no answer in 15 s (a long command, a dialog, or the user mid-input); try again" % name)
@@ -322,13 +323,29 @@ def doctor(port):
     return 0 if ready and not failed else 1
 
 
+NO_TAPIR = ("Tapir is not loaded in this Archicad, so tapir.py cannot quit it: ask the user to save and quit Archicad,"
+            " then start it again - it loads Tapir at its start.")
+
+
+def no_tapir(port):
+    """Archicad answers on the port but has no Tapir command (error 4010), so it locks no Tapir file."""
+    try:
+        call("GetAddOnVersion", port=port, timeout=10)
+    except RuntimeError as e:
+        return '"code": 4010' in str(e)
+    except Exception:
+        pass
+    return False
+
+
 def install(options):
     """Tapir's official installer in console mode, its own options passed through."""
     command = [sys.executable, "-I", "-X", "utf8", from_repo(latest_tapir(), INSTALLER), "--console"] + options
     done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(done.stdout + done.stderr, end="")
     if done.returncode and WINDOWS and "Permission denied" in done.stdout + done.stderr:
-        if archicads() or archicad_windows():           # also one that is starting or on a dialog, without a port
+        ports = archicads()                             # one without Tapir (a first install) locks nothing of it
+        if [p for p in ports if not no_tapir(p)] or (not ports and archicad_windows()):   # or one with no port yet
             print("Archicad is running and locks the add-ons it loaded: save, quit it (tapir.py quit does not save),"
                   " then install again.")
         else:
@@ -453,6 +470,9 @@ def quit_archicad(port, wait):
             return 1
         if refuses(e):                             # the user is at it: do not close it under them without saving
             print(REFUSES % (e, shows()) + " Not quitting.")
+            return 1
+        if '"code": 4010' in str(e):               # no Tapir: no QuitArchicad to send
+            print(NO_TAPIR)
             return 1
     pid = listening_pid(port) if WINDOWS else None   # ponytail: macOS waits on the port only; nothing locks there
     try:
@@ -607,8 +627,8 @@ def dbwin(out):
 
 
 QUOTES = (" - Windows PowerShell 5.1 and cmd.exe strip the double quotes out of inline JSON (cmd.exe has no single"
-          ' quotes either): use key=value pairs or a UTF-8 "@file.json" (in double quotes: PowerShell reads a bare'
-          " @name as splatting)")
+          ' quotes either): use key=value for plain values and a UTF-8 "@file.json" for a list or object (in double'
+          ' quotes: PowerShell reads a bare @name as splatting), or write each inner quote as \\"')
 
 
 def parameters(args):
@@ -636,16 +656,26 @@ def parameters(args):
                      " or - for stdin), not both%s" % (a, QUOTES if "{" in a or "[" in a else ""))
         try:
             pairs[key] = json.loads(value)
-        except ValueError:
+        except ValueError:                         # [OnActualFloor]: the quotes stripped, not a string to send
+            if value.lstrip().startswith(("[", "{")):
+                sys.exit("cannot read %s as JSON%s" % (a, QUOTES))
             pairs[key] = value
     return pairs
+
+
+def errors(value):
+    """Whether value holds an {"error": {...}} at any depth - e.g. one property of an element in
+    GetPropertyValuesOfElements. Not details {"error": "Not yet supported element type"}: that element was read."""
+    if isinstance(value, dict):
+        return isinstance(value.get("error"), dict) or any(errors(v) for v in value.values())
+    return isinstance(value, list) and any(errors(v) for v in value)
 
 
 def outline(value):
     """A result without its content: list lengths and keys, with how many items are empty or failed."""
     if isinstance(value, list):
         empty = sum(1 for v in value if v == {})   # e.g. fields the command does not know: no error, only {}
-        failed = sum(1 for v in value if isinstance(v, dict) and "error" in v)   # one element's error, or a failed
+        failed = sum(1 for v in value if errors(v))   # one element's error, one of its properties, a failed
         notes = ["%d empty" % empty] * bool(empty) + ["%d failed" % failed] * bool(failed)   # executionResult
         return "%d items" % len(value) + (" (%s)" % ", ".join(notes) if notes else "")
     if isinstance(value, dict):

@@ -135,6 +135,11 @@ assert not tapir.timed_out(ConnectionRefusedError(10061, "refused"))
 assert tapir.parameters([]) is None
 assert tapir.parameters(["elementType=Wall", "storyIndex=2", "hidden=true", "ids=[1,2]"]) == \
     {"elementType": "Wall", "storyIndex": 2, "hidden": True, "ids": [1, 2]}
+# a key=value list or object whose quotes PowerShell 5.1 / cmd.exe stripped is refused, not sent as a string
+assert "@file.json\" for a list or object" in exits(tapir.parameters, ["filters=[OnActualFloor]"])
+assert "@file.json" in exits(tapir.parameters, ["elementType=Slab", "x={a: b}"])
+assert tapir.parameters(['filters=["OnActualFloor"]', "name=Plan [draft]"]) == \
+    {"filters": ["OnActualFloor"], "name": "Plan [draft]"}
 assert tapir.parameters(['{"elements": []}']) == {"elements": []}
 with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8-sig", delete=False) as f:
     f.write('{"name": "图层"}')
@@ -182,6 +187,11 @@ assert tapir.outline({"detailsOfElements": [{"error": {"code": 1}}, {}, {"type":
     {"detailsOfElements": "3 items (1 empty, 1 failed)"}
 assert tapir.outline({"executionResults": [{"success": False, "error": {}}, {"success": True}]}) == \
     {"executionResults": "2 items (1 failed)"}
+# one property (or classification) of an element failed, one level down; a details text named error is data
+assert tapir.outline({"propertyValuesForElements": [{"propertyValues": [{"error": {}}]}, {"propertyValues": []}]}) == \
+    {"propertyValuesForElements": "2 items (1 failed)"}
+unsupported = {"type": "Dimension", "details": {"error": "Not yet supported element type"}}
+assert tapir.outline({"detailsOfElements": [unsupported]}) == {"detailsOfElements": "1 items"}
 assert tapir.numbers("1.7.0") < tapir.numbers("1.7.1") < tapir.numbers("1.10.0")
 
 # an Archicad that runs without a port (still starting, or a dialog waits): doctor, quit and open must not take it
@@ -435,6 +445,48 @@ try:
         assert tapir.doctor(port) == 1
         assert tapir.quit_archicad(port, 1) == 1
     assert said.getvalue().count("This project is in use by me") == 2, said.getvalue()
+finally:
+    for name, value in saved.items():
+        setattr(tapir, name, value)
+
+# an Archicad without Tapir (error 4010, a first install) locks nothing of it: an install denied there retries
+# elevated, not 'quit it'; quit, which has no QuitArchicad to send, and doctor say that the user restarts it. An
+# Archicad with Tapir loaded still locks it, also while it refuses commands (4001).
+tapir_answers, elevated = [4010], []
+
+
+def tapir_call(command, params=None, port=None, timeout=None):
+    if command == "API.GetProductInfo":
+        return {"version": 28, "languageCode": "INT", "buildNumber": 1}
+    if not tapir_answers[0]:
+        return {"version": "1.7.1"}
+    raise RuntimeError('%s: {"code": %d, "message": "..."}' % (command, tapir_answers[0]))
+
+
+saved = {name: getattr(tapir, name) for name in ("call", "archicads", "archicad_windows", "latest_tapir", "from_repo",
+                                                 "subprocess", "as_admin", "WINDOWS", "listening", "listening_pid")}
+tapir.call, tapir.archicads, tapir.archicad_windows = tapir_call, (lambda: [port]), (lambda: {})
+tapir.latest_tapir, tapir.from_repo = (lambda: "1.7.2"), (lambda tag, path: "tapir_installer.py")
+tapir.subprocess = types.SimpleNamespace(run=lambda *args, **kwargs: types.SimpleNamespace(
+    returncode=1, stdout="", stderr="ERROR: Permission denied. Close Archicad if it is running, or run the installer"
+                                    " as administrator."))
+tapir.as_admin, tapir.WINDOWS = (lambda command: elevated.append(command) or 0), True
+tapir.listening, tapir.listening_pid = (lambda p: True), (lambda p: None)
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        assert tapir.install(["--versions", "28"]) == 0 and len(elevated) == 1
+        assert tapir.quit_archicad(port, 1) == 1
+    assert "locks" not in said.getvalue() and "user to save and quit" in said.getvalue(), said.getvalue()
+    assert "refused" not in said.getvalue(), said.getvalue()
+    tapir.latest_tapir, tapir.WINDOWS = (lambda: (_ for _ in ()).throw(OSError("offline"))), saved["WINDOWS"]
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        assert tapir.doctor(port) == 1
+    assert "Tapir not loaded" in said.getvalue() and "quit needs Tapir loaded" in said.getvalue(), said.getvalue()
+    tapir.latest_tapir, tapir.WINDOWS = (lambda: "1.7.2"), True
+    for tapir_answers[0] in (None, 4001):
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            assert tapir.install(["--versions", "28"]) == 1 and len(elevated) == 1
+        assert "locks the add-ons" in said.getvalue(), said.getvalue()
 finally:
     for name, value in saved.items():
         setattr(tapir, name, value)

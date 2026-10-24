@@ -49,11 +49,11 @@ agent 会先跑 `doctor`，每条 `[!!]` 都写明下一步：
 [ok] Windows code page 936
 [ok] latest Tapir release: 1.7.1
 [--] Archicad 28 in C:\Program Files\GRAPHISOFT\Archicad 28: Tapir not installed (tapir.py install --versions 28)
-[!!] port 19723: Archicad 28 CHI build 5000, Tapir not loaded (...): tapir.py install, then restart Archicad
+[!!] port 19723: Archicad 28 CHI build 5000, Tapir not loaded (...): tapir.py install, then the user restarts Archicad (tapir.py quit needs Tapir loaded)
 not ready - fix the [!!] lines, then run doctor again
 ```
 
-照着做：`install` → 重启 Archicad → 再跑 `doctor`，直到输出 `ready`。
+照着做：`install` → 重启 Archicad → 再跑 `doctor`，直到输出 `ready`。Tapir 还没加载时 `tapir.py quit` 用不了：这一次由你自己保存、退出、再启动 Archicad。
 
 ## 脚本
 
@@ -94,10 +94,12 @@ is not available: use npx or the copy)
 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill` then `/plugin install archicad-tapir@archicad-tapir-skill`,
 or in Codex `$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir`,
 or, with no git, take Code > Download ZIP on GitHub and copy its `skills/archicad-tapir` into `~/.claude/skills/`
-(Claude Code) or `~/.agents/skills/` (Codex). Get git with `winget install Git.Git` or from git-scm.com. Installing
+(Claude Code; `%USERPROFILE%\.claude\skills\` on Windows) or `~/.agents/skills/` (Codex). Get git with
+`winget install Git.Git` or from git-scm.com, then restart the terminal and the agent. Installing
 Tapir asks for administrator rights when the Add-Ons folder needs them (UAC on Windows, a password dialog on macOS).
 Restart the agent, then ask it to check the Archicad setup: it runs `doctor` and follows each `[!!]` line until
-doctor prints `ready`. The script also runs by hand
+doctor prints `ready` (the first restart of Archicad after installing Tapir is yours: `tapir.py quit` needs Tapir
+loaded). The script also runs by hand
 (`python tapir.py doctor | install | help | call | quit | open | dbwin`; command list above). Codex's default sandbox cuts the network, 127.0.0.1 included: let the agent run `tapir.py` outside the
 sandbox (or set `network_access = true` under `[sandbox_workspace_write]` in `config.toml`).
 
