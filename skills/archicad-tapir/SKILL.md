@@ -6,9 +6,13 @@ description: Connect to a running Archicad through the Tapir add-on's JSON API a
 # Archicad through Tapir
 
 [Tapir](https://github.com/ENZYME-APD/tapir-archicad-automation) is a free Archicad add-on (MIT) that adds a few
-hundred commands (`tapir.py help` lists those of the installed version) to the JSON API every Archicad serves on
-`http://127.0.0.1:19723`. Everything here goes through one script next to this file, `scripts/tapir.py` (Python 3.8+,
-standard library only). Run it by its full path; below it is written `tapir.py`.
+hundred commands (`tapir.py help` lists those of the version Archicad runs, or of the latest release when it does not
+answer) to the JSON API every Archicad serves on `http://127.0.0.1:19723`. Everything here goes through one script
+next to this file, `scripts/tapir.py` (Python 3.8+, standard library only). Always start it through Python with its
+full path - `python "<this skill>/scripts/tapir.py" ...` (section 1 says which Python command) - never by its path
+alone: on Windows that can start the Microsoft Store's `python3` placeholder ("Python was not found" although Python
+is installed), and on macOS the file is not executable. Below, and in what tapir.py prints, `tapir.py` stands for
+that whole command.
 
 The agent has to run on the computer Archicad runs on (Claude Code, Codex CLI or app, Cursor, ...); a cloud sandbox
 cannot reach it. The port has no password, and Archicad can accept connections from other computers, not only from
@@ -40,7 +44,8 @@ Python 3 (python.org, or `winget install Python.Python.3.13`). Every `[!!]` line
   the user. Archicad has to be restarted to load Tapir.
 - **A newer Tapir is out** (a `[--]` line; `doctor` still says `ready`) - optional: mention it, and update only if the
   user wants to. Windows locks loaded add-ons, so then they save, Archicad is quit (section 4), `tapir.py install`,
-  start it again.
+  start it again. `install` passes every option to Tapir's installer: leave out its update mode (`--addOnFile`,
+  `--archicadPort`), which quits Archicad itself as `quit` does (on Archicad 28 without saving or asking).
 - **Busy** - Archicad runs a long command or shows a dialog, or the user is mid-input. Wait, or ask the user to look.
 - **Connecting to 127.0.0.1 is not allowed** - an agent sandbox that cuts the network (such as Codex's default one)
   blocks 127.0.0.1 too, and every port looks closed. Run `tapir.py` with network access (in Codex: approve running it
@@ -51,7 +56,8 @@ Run `doctor` again until it prints `ready`. `install` and `help` need github.com
 ## 2. Run commands
 
 ```
-tapir.py help                                   # every Tapir command of the version Archicad runs
+tapir.py help                                   # every Tapir command of the version Archicad runs (of the latest
+                                                # release when it does not answer: the last line names the version)
 tapir.py help GetDetailsOfElements              # one command: parameters, result, the definitions they use
 tapir.py call GetProjectInfo
 tapir.py call GetElementsByType elementType=Wall
@@ -60,16 +66,20 @@ tapir.py call API.GetProductInfo                # Archicad's built-in commands
 tapir.py call MyAddOn/RunCheck '{"level": 2}'   # any add-on's own JSON command: Namespace/Name
 ```
 
-- Look the schema up with `help` before writing parameters. A wrong one fails - usually with error 4002, whose message
-  names the path that failed; a wrong enum value may come back with Tapir's own code and message instead, or, in
-  `fields`, not fail at all (below).
+- Look the schema up with `help` before writing parameters, and copy enum values from it exactly. Archicad rejects an
+  unknown or missing key and a value of the wrong type with error 4002, whose message names the path that failed -
+  but it does not check what the schema reaches through a `$ref` (`#/...`): enum values and the items of a list. A
+  misspelt `elementType` comes back with Tapir's own code and message; a misspelt `filters` value is dropped without a
+  word, so `GetElementsByType` returns every element of the type (and a number as `elementType` every element of the
+  project); an unknown `fields` name returns `{}` (below); an id without its `elementId` / `attributeId` wrapper
+  fails per item. After a filtered call, check that it returned fewer than the same call without the filter.
 - Parameters: either `key=value` pairs (values read as JSON when they parse) or one JSON object - inline,
   `"@file.json"` (in double quotes: PowerShell reads a bare `@name` as splatting) or `-` for stdin - not both. Never a
   bare list (say, a file of element ids): it crashes Archicad, so `tapir.py` refuses it - wrap it as
   `{"elements": [...]}`. Windows PowerShell 5.1 and cmd.exe strip the double quotes out of inline JSON, and 5.1 pipes
   non-ASCII text as `?`: there, use `key=value` or a UTF-8 `"@file.json"`.
-- `--out file.json` writes the result as UTF-8 and prints only its outline (list lengths). Use it for anything large;
-  PowerShell's `>` would write UTF-16.
+- `--out file.json` writes the result as UTF-8 and prints only its outline (list lengths, with how many items are
+  empty or failed - open the file for their messages). Use it for anything large; PowerShell's `>` would write UTF-16.
 - `tapir.py` prints UTF-8. Piped or captured in PowerShell (`| Select-String`, `$x = ...`, `| ConvertFrom-Json`) or
   cmd (`| findstr`), non-ASCII names come out wrong - on Chinese or Japanese Windows as plausible but different
   characters. Put `[Console]::OutputEncoding = [Text.UTF8Encoding]::new();` (PowerShell) or `chcp 65001 >nul &` (cmd)
@@ -141,17 +151,23 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
   yet. `call OpenProject projectFilePath=...` switches projects inside a running Archicad, but like `quit` it drops
   the open project's unsaved changes without asking (seen on Archicad 28): ask the user first, or have them save. A
   dialog the project raises on opening (missing libraries, file conversion) holds the call until someone answers it.
-- `open` on a large project takes minutes: run it in the background, or with a tool timeout of at least 15 minutes.
-  If the tool call was cut off, Archicad keeps starting - run `doctor`, not `open` again. On Windows `open` prints the
-  windows Archicad shows meanwhile: 'Archicad NN', '<name> - Archicad NN' or 'Untitled - Archicad NN' is its main
-  window and '... Palette' a palette - neither waits for an answer; a progress window (such as Opening Project) means
-  it is loading; a dialog is listed with its text after its title, e.g. `Information: "<file>" This project is in use
-  by <user>` (a bare `Information` is that dialog too). After a crash or a forced end expect two in turn: Project
-  Recovery (Cancel goes on without recovering but keeps the recovery data, so it asks again at every start until the
-  data is opened or deleted), then "This project is in use by <you>" - the lock the crash left next to the project,
-  which Open with Exclusive Access is meant for when the name is the user's own and no other Archicad of theirs has the
-  project open; otherwise Don't Open. Also: licence, missing libraries, file conversion. Tell the user what is on
-  screen and let them choose; do not press buttons in their project.
+- `open` on a large project takes minutes and waits up to 15 minutes (`--wait`, default 900 s); `quit` up to about 4
+  (give it a 5-minute tool timeout). Run `open` in the background - an agent's tool call is usually cut off sooner,
+  and a foreground one shows nothing until it returns - and let it end by itself. Meanwhile read its output, or run
+  `doctor`, about every minute: `open` prints each window once, when it appears, then waits silently, so a dialog line
+  means Archicad waits for the user - tell them at once. If a tool call was cut off anyway, Archicad keeps starting -
+  run `doctor`, not `open` again. On Windows `open` prints the windows Archicad shows meanwhile: 'Archicad NN',
+  '<name> - Archicad NN' or 'Untitled - Archicad NN' is its main window, also with a docked palette's label after it
+  (e.g. '<name> - Archicad NN: Main:'), and '... Palette' a palette - neither waits for an answer; a progress window
+  (such as Opening Project) means it is loading; a dialog is listed with its text after its title, e.g.
+  `Information: "<file>" This project is in use by <user>` (a bare `Information` is that dialog too). If the Archicad
+  it started ends before the project is open (a crash - often of an add-on just built - or the user closed it), `open`
+  says so and exits 1: tell the user, then run `doctor`. After a crash or a forced end expect two in turn: Project
+  Recovery (Cancel goes on without recovering but keeps the recovery data, so it asks again at every start - also
+  after a clean `quit` - until the data is opened or deleted), then "This project is in use by <you>" - the lock the
+  crash left next to the project, which Open with Exclusive Access is meant for when the name is the user's own and no
+  other Archicad of theirs has the project open; otherwise Don't Open. Also: licence, missing libraries, file
+  conversion. Tell the user what is on screen and let them choose; do not press buttons in their project.
 - Give the add-on a JSON command for everything worth testing - a class deriving from `API_AddOnCommand`, registered
   in `Initialize()` with `ACAPI_AddOnAddOnCommunication_InstallAddOnCommandHandler` (Archicad 27+;
   `ACAPI_Install_AddOnCommandHandler` before) - so the agent runs it with `call Namespace/Name` instead of a click.
@@ -186,9 +202,12 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
 - **Groups**: `DeleteElements` on one element of a group deletes the whole group; `MoveElements` on several members
   moves the group once per member. Look at `GetGroupsOfElements` first and act once per group. Suspend Groups does not
   change this.
-- **One command at a time**: commands run on Archicad's main thread, so a long command or a modal dialog makes every
-  other call time out. Error 4001 (invalid program status, ongoing user input) means the user is in the middle of
-  something: ask them to finish it or press Esc. Don't point two agents at one Archicad.
+- **One command at a time**: commands run on Archicad's main thread, so a long command makes every other call time
+  out; a modal dialog or the user's input makes them fail with error 4001, whose message names the reason (no open
+  project / ongoing user input / there is an open modal dialog: <name>): ask the user to finish it or press Esc.
+  Don't point two agents at one Archicad.
+- **Misspelt filters**: an unknown `filters` value is ignored, not rejected - the call returns what it would without
+  it (section 2).
 - **Layer numbers**: element details give `layerIndex`; `GetAttributesByType` with `attributeType: Layer` gives each
   layer's `index`. Match on it, not on list order.
 - **Arcs and circles**: `GetElementsByType` with `Arc` returns the circles too (every one of them, in a measured

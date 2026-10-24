@@ -4,7 +4,8 @@
   tapir.py doctor                       check Python, Archicad and Tapir; every [!!] line says what to do
   tapir.py install [installer options]  install or update Tapir with its official installer, latest release
                                         (--versions 28   --dryRun   --uninstall   --addOnsFolder DIR)
-  tapir.py help [Command|Definition]    the commands of the Tapir version Archicad runs, or one command's schema
+  tapir.py help [Command|Definition]    the commands of the Tapir version Archicad runs (of the latest release
+                                        when it does not answer), or one command's schema
   tapir.py call Command [params]        run a Tapir command; API.Name runs a built-in one, Namespace/Name an add-on's
   tapir.py quit                         quit Archicad WITHOUT saving (it does not ask) and wait until it is gone
   tapir.py open PROJECT [--exe PATH]    start Archicad on a project and wait until it answers for it; on Windows
@@ -178,6 +179,13 @@ def no_project(error):
     return isinstance(error, RuntimeError) and "no open project" in str(error)
 
 
+def refuses(error):
+    """Error 4001 (invalid program status) for any reason: no project, a modal dialog, the user in the middle of input."""
+    return isinstance(error, RuntimeError) and '"code": 4001' in str(error)
+
+
+REFUSES = ("Archicad answers but refuses commands now (%s; %s): a dialog is open or the user is in the middle of"
+           " something - ask them to finish it or press Esc, then try again.")
 PORTLESS = ("it is still starting, or a dialog waits for the user (project recovery, a project in use, licence) -"
             " tell them what it shows and let them answer it. Do not start another Archicad.")
 CRASHED = ("Changes since the last save are lost unless Project Recovery offers them when Archicad starts again: tell"
@@ -269,6 +277,9 @@ def doctor(port):
             if no_project(e):
                 report(False, "port %d: Archicad runs with no project open (%s): %s" % (p, shows(), PORTLESS))
                 continue
+            if refuses(e):
+                report(False, "port %d: " % p + REFUSES % (e, shows()))
+                continue
             report(False, "port %d: no answer in 10 s (%s) - Archicad is busy (opening a project, a long command, a dialog, the"
                           " user mid-input) or hangs: wait, or ask the user to look, then run doctor again" % (p, shows())
                    if timed_out(e) else "port %d: something listens there but does not answer like Archicad (%s)" % (p, e))
@@ -277,7 +288,12 @@ def doctor(port):
         try:
             version = call("GetAddOnVersion", port=p, timeout=15)["version"]
         except RuntimeError as e:
-            report(False, "%s, Tapir not loaded (%s): tapir.py install, then restart Archicad" % (name, e))
+            if no_project(e):
+                report(False, "%s runs with no project open (%s): %s" % (name, shows(), PORTLESS))
+            elif refuses(e):
+                report(False, "%s: " % name + REFUSES % (e, shows()))
+            else:
+                report(False, "%s, Tapir not loaded (%s): tapir.py install, then restart Archicad" % (name, e))
             continue
         except Exception:
             report(False, "%s is busy - no answer in 15 s (a long command, a dialog, or the user mid-input); try again" % name)
@@ -435,6 +451,9 @@ def quit_archicad(port, wait):
             print("Archicad runs with no project open (%s): %s Its add-ons stay locked until it is gone."
                   % (shows(), PORTLESS))
             return 1
+        if refuses(e):                             # the user is at it: do not close it under them without saving
+            print(REFUSES % (e, shows()) + " Not quitting.")
+            return 1
     pid = listening_pid(port) if WINDOWS else None   # ponytail: macOS waits on the port only; nothing locks there
     try:
         call("QuitArchicad", port=port, timeout=30)
@@ -473,6 +492,12 @@ def project_port(path, unknown=None):
     return None
 
 
+# Windows: Archicad is started by a Python that exits at once, so that it is in no process tree of this open - an
+# agent that stops a background open ends that whole tree. --exe: DETACHED | NEW_GROUP; else the file's association.
+LAUNCH = ("import os, subprocess, sys; a = sys.argv[1:]\n"
+          "subprocess.Popen(a, close_fds=True, creationflags=0x00000208) if a[0] else os.startfile(a[1])")
+
+
 def open_project(path, exe, wait):
     path = os.path.abspath(path)
     if not os.path.exists(path):
@@ -491,6 +516,10 @@ def open_project(path, exe, wait):
                   " so which project it has open is unknown - perhaps this one. Wait until tapir.py doctor says ready, then"
                   " open again." % (port, shows()))
             return 1
+        if refuses(e):
+            print("Archicad on port %d: " % port + REFUSES % (e, shows()) + " Which project it has open is unknown"
+                  " - perhaps this one - so do not quit it to open this one.")
+            return 1
     others = archicads()
     if others:
         print('Archicad already runs on port %d. Switching drops its unsaved changes without asking - ask the user'
@@ -503,31 +532,45 @@ def open_project(path, exe, wait):
         return 1
     if exe and exe.endswith(".app"):
         subprocess.Popen(["open", "-a", exe, path])
+    elif WINDOWS:                                  # see LAUNCH
+        started = subprocess.run([sys.executable, "-I", "-c", LAUNCH, exe or "", path], capture_output=True,
+                                 text=True, errors="replace")
+        if started.returncode:
+            sys.exit("cannot start %s: %s" % (exe or "the program .pln files open with",
+                                              (started.stderr.strip().splitlines() or ["?"])[-1]))
     elif exe:
-        detach = {"creationflags": 0x00000208} if WINDOWS else {"start_new_session": True}  # DETACHED | NEW_GROUP
-        subprocess.Popen([exe, path], close_fds=True, **detach)
-    elif WINDOWS:
-        os.startfile(path)                         # the Archicad this file type opens with
+        subprocess.Popen([exe, path], close_fds=True, start_new_session=True)
     else:
         subprocess.Popen(["open", path])
     print("starting Archicad on %s - a large project takes minutes%s" % (
         path, "; the windows it shows are listed as they appear" if WINDOWS else ""), flush=True)
-    start, shown = time.time(), set()
+    start, shown, alive, seen, gone = time.time(), set(), set(), False, 0
     while time.time() < start + wait:
         time.sleep(5)
         port = project_port(path)
         if port:
             print("open on port %d: %s" % (port, path))
             return 0
-        for pid, titles in archicad_windows().items():       # a dialog shows up here long before any port
+        processes = archicad_windows()                       # Windows only: {} elsewhere, so the end is not seen there
+        for pid in sorted(alive - set(processes)):
+            print("  %d s: Archicad (pid %d) ended" % (time.time() - start, pid), flush=True)
+        alive, seen = set(processes), seen or bool(processes)
+        gone = gone + 1 if seen and not alive and not archicads() else 0
+        if gone == 2:                                        # two polls in a row: not a hand-over between processes
+            print("Archicad ended %d s after it started, before it opened the project: %s Run doctor before starting"
+                  " it again." % (time.time() - start, "it crashed - its Bug Reporter (GSReport) is open; the user"
+                                  " sends the report or closes it." if bug_reporter() else
+                                  "it crashed or was closed - ask the user."))
+            return 1
+        for pid, titles in processes.items():                # a dialog shows up here long before any port
             for title in titles:
                 key = (pid, re.sub(r"\d+", "#", title))             # a progress text that counts is one window
                 if key not in shown:
                     shown.add(key)
                     print("  %d s: Archicad (pid %d) shows '%s'" % (time.time() - start, pid, title), flush=True)
-    print("Archicad did not answer for the project in %d s. Probably a dialog waits on screen: project recovery after a"
-          " crash, 'This project is in use' (the lock a crash or a forced quit leaves), licence, missing libraries,"
-          " file conversion. Tell the user what it shows." % wait)
+    print("Archicad did not answer for the project in %d s. Probably a dialog waits on screen: project recovery (after a"
+          " crash, or data an earlier Cancel kept), 'This project is in use' (the lock a crash or a forced quit leaves),"
+          " licence, missing libraries, file conversion. Tell the user what it shows." % wait)
     return 1
 
 
@@ -599,10 +642,12 @@ def parameters(args):
 
 
 def outline(value):
-    """A result without its content: list lengths and keys."""
+    """A result without its content: list lengths and keys, with how many items are empty or failed."""
     if isinstance(value, list):
         empty = sum(1 for v in value if v == {})   # e.g. fields the command does not know: no error, only {}
-        return "%d items" % len(value) + (" (%d empty)" % empty if empty else "")
+        failed = sum(1 for v in value if isinstance(v, dict) and "error" in v)   # one element's error, or a failed
+        notes = ["%d empty" % empty] * bool(empty) + ["%d failed" % failed] * bool(failed)   # executionResult
+        return "%d items" % len(value) + (" (%s)" % ", ".join(notes) if notes else "")
     if isinstance(value, dict):
         return {k: outline(v) if isinstance(v, (list, dict)) else v for k, v in value.items()}
     return value

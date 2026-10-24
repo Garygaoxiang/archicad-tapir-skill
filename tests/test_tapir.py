@@ -63,7 +63,17 @@ port = server.server_address[1]
 tapir.PORT = port                                      # a command that misses its --port reaches the fake, not Archicad
 launched = []                                          # and nothing tested here may start a program
 os.startfile = lambda *args: launched.append(args)
-tapir.subprocess = types.SimpleNamespace(run=subprocess.run, Popen=lambda *args, **kwargs: launched.append(args))
+
+
+def no_launch(command, *args, **kwargs):
+    """subprocess.run, except that open's launcher is only recorded."""
+    if tapir.LAUNCH in command:
+        launched.append(command)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return subprocess.run(command, *args, **kwargs)
+
+
+tapir.subprocess = types.SimpleNamespace(run=no_launch, Popen=lambda *args, **kwargs: launched.append(args))
 
 assert tapir.call("API.IsAlive", port=port) == {"isAlive": True}
 assert seen[-1] == {"command": "API.IsAlive"}
@@ -168,6 +178,10 @@ assert "wrote" in said.getvalue()
 assert tapir.outline({"elements": [1, 2, 3], "nested": {"ids": []}, "ok": True}) == \
     {"elements": "3 items", "nested": {"ids": "0 items"}, "ok": True}
 assert tapir.outline({"detailsOfElements": [{}, {}, {"type": "Wall"}]}) == {"detailsOfElements": "3 items (2 empty)"}
+assert tapir.outline({"detailsOfElements": [{"error": {"code": 1}}, {}, {"type": "Wall"}]}) == \
+    {"detailsOfElements": "3 items (1 empty, 1 failed)"}
+assert tapir.outline({"executionResults": [{"success": False, "error": {}}, {"success": True}]}) == \
+    {"executionResults": "2 items (1 failed)"}
 assert tapir.numbers("1.7.0") < tapir.numbers("1.7.1") < tapir.numbers("1.10.0")
 
 # an Archicad that runs without a port (still starting, or a dialog waits): doctor, quit and open must not take it
@@ -178,7 +192,7 @@ started = []
 tapir.archicads, tapir.listening = (lambda: []), (lambda port: False)
 tapir.archicad_windows = lambda: {123: ["Archicad Project Recovery"]}
 tapir.latest_tapir = lambda: (_ for _ in ()).throw(OSError("offline"))
-tapir.subprocess = types.SimpleNamespace(run=subprocess.run, Popen=lambda *args, **kwargs: started.append(args))
+tapir.subprocess = types.SimpleNamespace(run=no_launch, Popen=lambda *args, **kwargs: started.append(args))
 tapir.os = types.SimpleNamespace(path=os.path, startfile=lambda *args: started.append(args))   # only tapir's view
 try:
     with contextlib.redirect_stdout(io.StringIO()) as said:
@@ -232,6 +246,76 @@ finally:
         setattr(tapir, name, value)
     in_use.shutdown()
 
+# 4001 for another reason (a modal dialog, the user mid-input): it is Archicad with Tapir, and the project it has open
+# may be this one - doctor, quit and open must say it refuses for now, not 'not Archicad', 'install' or 'switch'
+asked, product = [], {"answers": False, "reason": "ongoing user input"}
+
+
+class MidInput(FakeArchicad):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        asked.append(body)
+        reply = {"succeeded": False, "error": {"code": 4001, "message": "Invalid program status (%s)" % product["reason"]}}
+        if body["command"] == "API.GetProductInfo" and product["answers"]:
+            reply = {"succeeded": True, "result": {"version": 28, "languageCode": "INT", "buildNumber": 1}}
+        data = json.dumps(reply).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+mid = HTTPServer(("127.0.0.1", 0), MidInput)
+threading.Thread(target=mid.serve_forever, daemon=True).start()
+busy = mid.server_address[1]
+saved = {name: getattr(tapir, name) for name in ("PORTS", "archicad_windows", "latest_tapir", "listening_pid")}
+tapir.PORTS, tapir.listening_pid = range(busy, busy + 1), (lambda port: None)
+tapir.archicad_windows = lambda: {123: ["Demo - Archicad 28"]}
+tapir.latest_tapir = lambda: (_ for _ in ()).throw(OSError("offline"))
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        assert tapir.doctor(busy) == 1
+        product["answers"] = True                  # the user starts typing between doctor's first two calls
+        assert tapir.doctor(busy) == 1
+        product["answers"] = False
+        assert tapir.quit_archicad(busy, 1) == 1
+        assert tapir.open_project(os.path.abspath(__file__), None, 1) == 1
+        product.update(answers=True, reason="no open project")          # a built-in command that needs no project
+        assert tapir.doctor(busy) == 1
+    assert said.getvalue().count("refuses commands now") == 4, said.getvalue()
+    assert "build 1 runs with no project open (pid 123" in said.getvalue(), said.getvalue()
+    for wrong in ("does not answer like Archicad", "Tapir not loaded", "Switching"):
+        assert wrong not in said.getvalue(), said.getvalue()
+    assert "QuitArchicad" not in json.dumps(asked), asked
+finally:
+    for name, value in saved.items():
+        setattr(tapir, name, value)
+    mid.shutdown()
+
+# open: the Archicad it started ends before the project is open (a crash, or the user closed it) - say so at once, not
+# after --wait; one poll with no Archicad between two processes is a hand-over, not an end. A fake clock: no waiting.
+clock = [0.0]
+saved = {name: getattr(tapir, name) for name in ("archicads", "archicad_windows", "bug_reporter", "time", "subprocess")}
+tapir.archicads = lambda: []
+tapir.time = types.SimpleNamespace(time=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+tapir.subprocess = types.SimpleNamespace(run=lambda *args, **kwargs: types.SimpleNamespace(returncode=0),
+                                         Popen=lambda *args, **kwargs: None)                 # 'starts' Archicad
+try:
+    for polls, reporter, wanted, unwanted in (
+            ([{5: ["Archicad Project Recovery"]}, {}, {6: ["Untitled - Archicad 28"]}, {}, {}], False,
+             ["pid 5) ended", "pid 6) ended", "ended 25 s after it started", "crashed or was closed"], "did not answer"),
+            ([{5: ["Archicad 28"]}, {}, {}], True, ["ended 15 s after", "Bug Reporter"], "did not answer"),
+            ([], False, ["did not answer for the project in 30 s"], "ended")):   # tasklist blocked: none is ever seen
+        polls, clock[0] = [{}] + polls, 0.0        # the first: open's check that none runs yet
+        tapir.archicad_windows = lambda: polls.pop(0) if polls else {}
+        tapir.bug_reporter = lambda: reporter
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            assert tapir.open_project(os.path.abspath(__file__), None, 30) == 1
+        assert all(w in said.getvalue() for w in wanted) and unwanted not in said.getvalue(), said.getvalue()
+finally:
+    for name, value in saved.items():
+        setattr(tapir, name, value)
+
 # Archicad busy (no answer in time): quit must not send a quit that would run later, open must not call it "another
 # project" and suggest quitting it
 sent = []
@@ -245,7 +329,7 @@ def no_answer(command, params=None, port=None, timeout=None):
 saved = {name: getattr(tapir, name) for name in ("call", "PORTS", "subprocess", "os")}
 started = []
 tapir.call, tapir.PORTS = no_answer, range(port, port + 1)                      # the fake port listens
-tapir.subprocess = types.SimpleNamespace(run=subprocess.run, Popen=lambda *args, **kwargs: started.append(args))
+tapir.subprocess = types.SimpleNamespace(run=no_launch, Popen=lambda *args, **kwargs: started.append(args))
 tapir.os = types.SimpleNamespace(path=os.path, startfile=lambda *args: started.append(args))
 try:
     with contextlib.redirect_stdout(io.StringIO()) as said:
@@ -357,6 +441,23 @@ finally:
 
 # a call that times out: the command goes on in Archicad, so the message must say not to send it again
 assert "do not send it again" in exits(tapir.main, ["call", "Slow", "--port", str(port), "--timeout", "0.3"])
+
+if tapir.WINDOWS:
+    # open starts Archicad through a process that exits at once, so that an agent stopping open (which ends its whole
+    # process tree) does not end Archicad; a program that cannot start is said, not waited for
+    saved = {name: getattr(tapir, name) for name in ("archicads", "archicad_windows", "project_port", "subprocess")}
+    tapir.archicads, tapir.archicad_windows, tapir.project_port = (lambda: []), (lambda: {}), (lambda *args: None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert tapir.open_project(os.path.abspath(__file__), r"C:\AC\Archicad.exe", 0) == 1
+        assert launched[-1][-2:] == [r"C:\AC\Archicad.exe", os.path.abspath(__file__)], launched
+        assert launched.pop()[:4] == [sys.executable, "-I", "-c", tapir.LAUNCH], launched
+        tapir.subprocess = types.SimpleNamespace(run=subprocess.run, Popen=None)   # the launcher runs, for real
+        missing = exits(tapir.open_project, os.path.abspath(__file__), os.path.join(folder, "no.exe"), 0)
+        assert "cannot start" in missing and "FileNotFoundError" in missing, missing
+    finally:
+        for name, value in saved.items():
+            setattr(tapir, name, value)
 
 server.shutdown()
 shutil.rmtree(folder, ignore_errors=True)
