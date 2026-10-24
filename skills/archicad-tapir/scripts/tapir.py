@@ -7,16 +7,20 @@
   tapir.py help [Command|Definition]    the commands of the Tapir version Archicad runs, or one command's schema
   tapir.py call Command [params]        run a Tapir command; API.Name runs a built-in one, Namespace/Name an add-on's
   tapir.py quit                         quit Archicad WITHOUT saving (it does not ask) and wait until it is gone
-  tapir.py open PROJECT [--exe PATH]    start Archicad on a project and wait until it answers for it
+  tapir.py open PROJECT [--exe PATH]    start Archicad on a project and wait until it answers for it; on Windows
+                                        it lists the windows (dialogs) Archicad shows meanwhile
   tapir.py dbwin                        Windows: print OutputDebugString lines (C++ add-on logs) until stopped
 
 params   inline JSON, key=value pairs (each value read as JSON when it parses), @file.json, or - for stdin
-options  --port N (default 19723 or $ARCHICAD_PORT)   --timeout SECONDS (call; default 600)
-         --out FILE (call, dbwin: write UTF-8 there)   --wait SECONDS (quit 180, open 900)
+options  go after the subcommand (tapir.py call X --port 19724)
+         --port N (default 19723 or $ARCHICAD_PORT)   --out FILE (call, dbwin: write UTF-8 there)
+         --timeout SECONDS (call; default 600 - it only stops the waiting, the command goes on in Archicad)
+         --wait SECONDS (quit 180, open 900)
 
 From Python:  sys.path.insert(0, "<this folder>"); from tapir import call
               walls = call("GetElementsByType", {"elementType": "Wall"})["elements"]
 """
+import csv
 import json
 import os
 import platform
@@ -38,7 +42,8 @@ LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # a syste
 
 
 def call(command, params=None, port=PORT, timeout=600):
-    """Runs one command and returns its result; raises RuntimeError carrying Archicad's error.
+    """Runs one command and returns its result; raises RuntimeError carrying Archicad's or Tapir's error.
+    One element's {"error": ...} inside a result list is returned in its place, for the caller to check.
     "API.X" is a built-in command, "Namespace/X" an add-on's own, a bare name a Tapir command."""
     if command.startswith("API."):
         body = {"command": command}
@@ -57,9 +62,15 @@ def call(command, params=None, port=PORT, timeout=600):
         raise RuntimeError("%s: %s" % (command, json.dumps(reply.get("error"), ensure_ascii=False)))
     result = reply.get("result") or {}
     result = result.get("addOnCommandResponse", result)
-    if isinstance(result, dict) and result.get("success") is False:        # Tapir's failed ExecutionResult
+    if isinstance(result, dict) and (result.get("success") is False        # Tapir's failed ExecutionResult
+                                     or set(result) == {"error"}):         # and its bare ErrorItem
         raise RuntimeError("%s: %s" % (command, json.dumps(result.get("error", result), ensure_ascii=False)))
     return result
+
+
+def timed_out(error):
+    """The call got no answer in time - which does not stop the command in Archicad."""
+    return isinstance(error, (socket.timeout, TimeoutError)) or "timed out" in str(error)
 
 
 def listening(port):
@@ -74,6 +85,50 @@ def archicads():
     """The ports Archicad instances listen on."""
     with ThreadPoolExecutor(len(PORTS)) as pool:
         return [port for port, up in zip(PORTS, pool.map(listening, PORTS)) if up]
+
+
+def archicad_windows():
+    """Windows: {pid: titles of its visible windows} of every running Archicad. Archicad opens its JSON port only once
+    a project is open, so one that is starting or waits on a dialog runs without a port. Elsewhere: {}."""
+    if not WINDOWS:
+        return {}
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Archicad.exe", "/FO", "CSV", "/NH"],
+                         capture_output=True, text=True, errors="replace").stdout
+    pids = [int(row[1]) for row in csv.reader(out.splitlines()) if len(row) > 1 and row[1].isdigit()]
+    return {pid: window_titles(pid) for pid in pids}
+
+
+def window_titles(pid):
+    """Windows: the titles of a process's visible top-level windows - a dialog's title says what it asks."""
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.WinDLL("user32")
+    user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    user.IsWindowVisible.argtypes = (wintypes.HWND,)
+    user.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    titles = []
+
+    def visit(window, _):
+        owner = wintypes.DWORD()
+        user.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == pid and user.IsWindowVisible(window):
+            text = ctypes.create_unicode_buffer(256)
+            user.GetWindowTextW(window, text, 256)
+            if text.value and text.value != "DGTransparentWindow":          # an empty helper window of Archicad
+                titles.append(text.value)
+        return True
+    user.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(visit), 0)
+    return titles
+
+
+def describe(processes):
+    """'pid 123 shows: Archicad Project Recovery' for each of archicad_windows()."""
+    return "; ".join("pid %d shows: %s" % (pid, ", ".join(titles) or "no window yet")
+                     for pid, titles in processes.items())
+
+
+PORTLESS = ("it is still starting, or a dialog waits for the user (project recovery, a project in use, licence) -"
+            " tell them what it shows and let them answer it. Do not start another Archicad.")
 
 
 def fetch(url, timeout=60):
@@ -132,16 +187,21 @@ def doctor(port):
     try:
         latest = latest_tapir()
         report(True, "latest Tapir release: " + latest)
-        installer = load_installer(latest)
-        found = installer.DetectArchicadInstallations()
-        for a in found:
-            has = installer.IsTapirInstalled(a.addOnsFolderPath)
-            report(True if has else None, "Archicad %d in %s: Tapir %s" % (
-                a.version, a.installPath, "installed" if has else "not installed (tapir.py install --versions %d)" % a.version))
-        if not found:
-            report(None, "no Archicad installation found in the usual places (Tapir needs Archicad 25 or later)")
     except Exception as e:
         report(None, "cannot reach GitHub (%s): install and help need github.com - behind a proxy set HTTPS_PROXY" % e)
+    if latest:
+        try:
+            installer = load_installer(latest)
+            found = installer.DetectArchicadInstallations()
+            for a in found:
+                has = installer.IsTapirInstalled(a.addOnsFolderPath)
+                report(True if has else None, "Archicad %d in %s: Tapir %s" % (
+                    a.version, a.installPath, "installed" if has else "not installed (tapir.py install --versions %d)" % a.version))
+            if not found:
+                report(None, "no Archicad installation found in the usual places (Tapir needs Archicad 25 or later)")
+        except Exception as e:
+            report(None, "Tapir's installer could not list the Archicad installations (%s); the checks below still apply"
+                   % e)
 
     ready = False
     ports = archicads()
@@ -149,7 +209,9 @@ def doctor(port):
         try:
             info = call("API.GetProductInfo", port=p, timeout=10)
         except Exception as e:
-            report(False, "port %d: something listens there but does not answer like Archicad (%s)" % (p, e))
+            report(False, "port %d: no answer in 10 s - Archicad is busy (a long command, a dialog, the user mid-input) or"
+                          " hangs: wait, or ask the user to look, then run doctor again" % p if timed_out(e) else
+                          "port %d: something listens there but does not answer like Archicad (%s)" % (p, e))
             continue
         name = "port %d: Archicad %s %s build %s" % (p, info.get("version"), info.get("languageCode"), info.get("buildNumber"))
         try:
@@ -170,7 +232,10 @@ def doctor(port):
         if latest and numbers(version) < numbers(latest):
             report(None, "Tapir %s is out: save, quit Archicad (tapir.py quit does not save), tapir.py install, start it again"
                    % latest)
-    if not ports:
+    silent = {} if ports else archicad_windows()
+    if silent:
+        report(False, "Archicad runs but answers on no port (%s): %s" % (describe(silent), PORTLESS))
+    elif not ports:
         report(False, "no Archicad listens on ports %d-%d: start Archicad and open a project, or tapir.py open <project>"
                % (PORTS[0], PORTS[-1]))
     print("ready" if ready and not failed else "not ready - fix the [!!] lines, then run doctor again")
@@ -183,7 +248,7 @@ def install(options):
     done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(done.stdout + done.stderr, end="")
     if done.returncode and WINDOWS and "Permission denied" in done.stdout + done.stderr:
-        if archicads():
+        if archicads() or archicad_windows():           # also one that is starting or on a dialog, without a port
             print("Archicad is running and locks the add-ons it loaded: save, quit it (tapir.py quit does not save),"
                   " then install again.")
         else:
@@ -280,6 +345,11 @@ def running(pid):
 
 def quit_archicad(port, wait):
     if not listening(port):
+        silent = {} if archicads() else archicad_windows()
+        if silent:                                 # not a success: its add-ons stay locked until it is gone
+            print("Archicad runs but answers on no port (%s): %s Its add-ons stay locked until it is gone."
+                  % (describe(silent), PORTLESS))
+            return 1
         print("no Archicad on port %d" % port)
         return 0
     reopen = ""
@@ -297,15 +367,18 @@ def quit_archicad(port, wait):
         print("Archicad refused to quit: %s" % e)
         return 1
     except OSError:
-        pass                                       # the connection can drop, or wait on the save dialog
+        pass                                       # the connection can drop as Archicad goes away
     deadline = time.time() + wait
     while time.time() < deadline:
         if not listening(port) and not (pid and running(pid)):
             print("Archicad quit." + reopen)
             return 0
         time.sleep(1)
-    print("Archicad still runs after %d s: a dialog may wait on screen, or it hangs on its way out - then end it in the"
-          " Task Manager (its next start offers project recovery)." % wait + reopen)
+    shows = describe({pid: window_titles(pid)}) if pid else ""
+    print("Archicad still runs after %d s%s: a dialog may wait on screen, or it hangs on its way out - then end it in the"
+          " Task Manager. Its next start offers project recovery, then may ask 'This project is in use by <you>' - the"
+          " lock the ended Archicad left: Open with Exclusive Access is meant for that; Don't Open if the name is"
+          " someone else's." % (wait, " (%s)" % shows if shows else "") + reopen)
     return 1
 
 
@@ -331,8 +404,13 @@ def open_project(path, exe, wait):
         return 0
     others = archicads()
     if others:
-        print('Archicad already runs on port %d. Open the project in it:  tapir.py call OpenProject projectFilePath="%s"'
-              '  - or quit it first (tapir.py quit).' % (others[0], path))
+        print('Archicad already runs on port %d. Switching drops its unsaved changes without asking - ask the user'
+              ' first, then: tapir.py quit and open again, or tapir.py call OpenProject projectFilePath="%s"'
+              % (others[0], path))
+        return 1
+    silent = archicad_windows()
+    if silent:
+        print("Archicad already runs but answers on no port (%s): %s" % (describe(silent), PORTLESS))
         return 1
     if exe and exe.endswith(".app"):
         subprocess.Popen(["open", "-a", exe, path])
@@ -343,15 +421,23 @@ def open_project(path, exe, wait):
         os.startfile(path)                         # the Archicad this file type opens with
     else:
         subprocess.Popen(["open", path])
-    deadline = time.time() + wait
-    while time.time() < deadline:
+    print("starting Archicad on %s - a large project takes minutes%s" % (
+        path, "; the windows it shows are listed as they appear" if WINDOWS else ""), flush=True)
+    start, shown = time.time(), set()
+    while time.time() < start + wait:
         time.sleep(5)
         port = project_port(path)
         if port:
             print("open on port %d: %s" % (port, path))
             return 0
+        for pid, titles in archicad_windows().items():       # a dialog shows up here long before any port
+            for title in titles:
+                if (pid, title) not in shown:
+                    shown.add((pid, title))
+                    print("  %d s: Archicad (pid %d) shows '%s'" % (time.time() - start, pid, title), flush=True)
     print("Archicad did not answer for the project in %d s. Probably a dialog waits on screen: project recovery after a"
-          " crash, licence, missing libraries, file conversion." % wait)
+          " crash, 'This project is in use' (the lock a crash or a forced quit leaves), licence, missing libraries,"
+          " file conversion. Tell the user what it shows." % wait)
     return 1
 
 
@@ -366,14 +452,17 @@ def dbwin(out):
     kernel.MapViewOfFile.restype = ctypes.c_void_p
     ready = kernel.CreateEventW(None, False, True, "DBWIN_BUFFER_READY")
     if ctypes.get_last_error() == 183:                                       # ERROR_ALREADY_EXISTS
-        sys.exit("another debug output listener runs (DebugView, another dbwin): only one of them gets the lines")
+        sys.exit("another debug output listener runs (DebugView, or a dbwin left over from an earlier session): only one"
+                 " of them gets the lines. A dbwin prints its pid on its first line: stop it with taskkill /PID <pid> /F,"
+                 " never by image name")
     data = kernel.CreateEventW(None, False, False, "DBWIN_DATA_READY")
     mapping = kernel.CreateFileMappingW(wintypes.HANDLE(-1), None, 0x04, 0, 4096, "DBWIN_BUFFER")
     buffer = kernel.MapViewOfFile(mapping, 0x0004, 0, 0, 4096)
     if not (ready and data and buffer):
         sys.exit("cannot open the DBWIN buffer")
     sink = open(out, "a", encoding="utf-8") if out else sys.stdout
-    print("listening", file=sink, flush=True)
+    for stream in {sink, sys.stdout}:                     # the pid, so that whoever reads the log can stop this one
+        print("listening, pid %d" % os.getpid(), file=stream, flush=True)
     while True:                # keep the handshake as it is: a second BUFFER_READY per message desynchronises it
         kernel.SetEvent(ready)
         if kernel.WaitForSingleObject(data, 30000) != 0:
@@ -389,13 +478,17 @@ def parameters(args):
     if not args:
         return None
     if len(args) == 1:
-        if args[0] == "-":
-            return json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
-        if args[0].startswith("@"):
-            with open(args[0][1:], encoding="utf-8-sig") as f:
-                return json.load(f)
-        if args[0].lstrip().startswith(("{", "[")):
-            return json.loads(args[0])
+        try:
+            if args[0] == "-":
+                return json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
+            if args[0].startswith("@"):
+                with open(args[0][1:], encoding="utf-8-sig") as f:
+                    return json.load(f)
+            if args[0].lstrip().startswith(("{", "[")):
+                return json.loads(args[0])
+        except ValueError as e:                    # also a file that is not UTF-8
+            sys.exit("parameters are not valid JSON (%s): %s - Windows PowerShell 5.1 strips the double quotes out of"
+                     " inline JSON; use key=value pairs or a UTF-8 @file.json" % (e, args[0]))
     pairs = {}
     for a in args:
         key, sep, value = a.partition("=")
@@ -431,12 +524,21 @@ def main(args):
         if name not in args:
             return default
         i = args.index(name)
+        if i + 1 == len(args) or args[i + 1].startswith("--"):
+            sys.exit("%s needs a value" % name)
         value = args[i + 1]
         del args[i:i + 2]
         return value
 
-    port, out, exe = int(option("--port", PORT)), option("--out"), option("--exe")
-    timeout, wait = float(option("--timeout", 600)), option("--wait")
+    def number(name, default, kind=float):
+        value = option(name, default)
+        try:
+            return None if value is None else kind(value)
+        except ValueError:
+            sys.exit("%s needs a number, not %r" % (name, value))
+
+    port, out, exe = number("--port", PORT, int), option("--out"), option("--exe")
+    timeout, wait = number("--timeout", 600), number("--wait", None)
     if command == "doctor":
         return doctor(port)
     if command == "help":
@@ -447,6 +549,10 @@ def main(args):
         except RuntimeError as e:
             sys.exit(str(e))
         except OSError as e:
+            if timed_out(e):
+                sys.exit("no answer in %g s - Archicad goes on with the command: do not send it again. When tapir.py"
+                         " doctor says ready it has finished; read the model to see what it did. Long commands:"
+                         " --timeout SECONDS, run in the background." % timeout)
             sys.exit("no answer on port %d (%s). Archicad not running, no project open, or busy with a long command"
                      " or a dialog? Try: tapir.py doctor" % (port, e))
         text = json.dumps(result, ensure_ascii=False, indent=1)
@@ -458,9 +564,9 @@ def main(args):
         print("wrote %s: %s" % (out, json.dumps(outline(result), ensure_ascii=False)))
         return 0
     if command == "quit":
-        return quit_archicad(port, float(wait or 180))
+        return quit_archicad(port, 180 if wait is None else wait)
     if command == "open" and args:
-        return open_project(args[0], exe, float(wait or 900))
+        return open_project(args[0], exe, 900 if wait is None else wait)
     if command == "dbwin" and WINDOWS:
         return dbwin(out)
     print(__doc__)
