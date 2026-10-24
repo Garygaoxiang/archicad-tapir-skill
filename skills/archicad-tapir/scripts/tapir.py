@@ -27,11 +27,13 @@ import json
 import os
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -199,7 +201,19 @@ def fetch(url, timeout=60):
 
 
 def latest_tapir():
-    return json.loads(fetch("https://api.github.com/repos/%s/releases/latest" % REPO, 30))["tag_name"]
+    """The latest release's tag, from where github.com's releases/latest redirects - not from GitHub's API, whose
+    anonymous limit (60 requests an hour per public address, an office's shared one) doctor would use up."""
+    request = urllib.request.Request("https://github.com/%s/releases/latest" % REPO, method="HEAD",
+                                     headers={"User-Agent": "archicad-tapir-skill"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        url = response.geturl()
+    if "/releases/tag/" not in url:
+        raise OSError("github.com answered with %s, not a release" % url)
+    return urllib.parse.unquote(url.rstrip("/").rsplit("/", 1)[-1])
+
+
+NO_GITHUB = ("cannot reach GitHub (%s): install and help need github.com and raw.githubusercontent.com, Tapir's"
+             " installer also release-assets.githubusercontent.com - behind a proxy set HTTPS_PROXY")
 
 
 def from_repo(tag, path):
@@ -249,7 +263,7 @@ def doctor(port):
         latest = latest_tapir()
         report(True, "latest Tapir release: " + latest)
     except Exception as e:
-        report(None, "cannot reach GitHub (%s): install and help need github.com - behind a proxy set HTTPS_PROXY" % e)
+        report(None, NO_GITHUB % e)
     if latest:
         try:
             installer = load_installer(latest)
@@ -340,7 +354,11 @@ def no_tapir(port):
 
 def install(options):
     """Tapir's official installer in console mode, its own options passed through."""
-    command = [sys.executable, "-I", "-X", "utf8", from_repo(latest_tapir(), INSTALLER), "--console"] + options
+    try:
+        installer = from_repo(latest_tapir(), INSTALLER)
+    except OSError as e:                           # URLError, HTTPError, a timeout
+        sys.exit(NO_GITHUB % e)
+    command = [sys.executable, "-I", "-X", "utf8", installer, "--console"] + options
     done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(done.stdout + done.stderr, end="")
     if done.returncode and WINDOWS and "Permission denied" in done.stdout + done.stderr:
@@ -354,21 +372,30 @@ def install(options):
     return done.returncode
 
 
+NETWORK = ("http_proxy", "https_proxy", "all_proxy", "no_proxy", "ssl_cert_file", "ssl_cert_dir")
+
+
 def as_admin(command):
-    """Windows: runs the command once more behind the UAC prompt and returns its exit code."""
+    """Windows: runs the command once more behind the UAC prompt and returns its exit code. The elevated process gets
+    the user's stored environment, not this one's: the proxy and certificate variables are passed on in run.cmd."""
     folder = tempfile.mkdtemp(prefix="tapir-install-")
     log, script = os.path.join(folder, "log.txt"), os.path.join(folder, "run.cmd")
-    with open(script, "w", encoding="utf-8") as f:           # chcp first, so that cmd reads the paths as UTF-8
-        f.write('@chcp 65001 >nul\r\n@%s > "%s" 2>&1\r\n' % (subprocess.list2cmdline(command), log))
-    code = subprocess.call(["powershell", "-NoProfile", "-Command",
-                            "exit (Start-Process -FilePath '%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden).ExitCode"
-                            % script.replace("'", "''")])
-    if not os.path.exists(log):
-        print("The administrator prompt was declined.")
-        return code or 1
-    with open(log, encoding="utf-8", errors="replace") as f:
-        print(f.read(), end="")
-    return code
+    passed = "".join('@set "%s=%s"\r\n' % (k, v.replace("%", "%%")) for k, v in os.environ.items()
+                     if k.lower() in NETWORK and not set('"\r\n') & set(v))
+    try:
+        with open(script, "w", encoding="utf-8") as f:       # chcp first, so that cmd reads the paths as UTF-8
+            f.write('@chcp 65001 >nul\r\n%s@%s > "%s" 2>&1\r\n' % (passed, subprocess.list2cmdline(command), log))
+        code = subprocess.call(["powershell", "-NoProfile", "-Command",
+                                "exit (Start-Process -FilePath '%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden)"
+                                ".ExitCode" % script.replace("'", "''")])
+        if not os.path.exists(log):
+            print("The administrator prompt was declined.")
+            return code or 1
+        with open(log, encoding="utf-8", errors="replace") as f:
+            print(f.read(), end="")
+        return code
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)            # run.cmd may hold a proxy password
 
 
 def tapir_docs(port):
@@ -376,10 +403,15 @@ def tapir_docs(port):
     try:
         tag = call("GetAddOnVersion", port=port, timeout=5)["version"]
     except Exception:
-        tag = latest_tapir()
+        tag = None
     parsed = []
     for name in ("command_definitions.js", "common_schema_definitions.js"):
-        with open(from_repo(tag, "docs/archicad-addon/" + name), encoding="utf-8") as f:
+        try:
+            tag = tag or latest_tapir()
+            local = from_repo(tag, "docs/archicad-addon/" + name)
+        except OSError as e:                       # URLError, HTTPError, a timeout
+            sys.exit(NO_GITHUB % e)
+        with open(local, encoding="utf-8") as f:
             text = f.read()
         parsed.append(json.loads(text[text.index("=") + 1:].strip().rstrip(";")))      # var gCommands = [...];
     return tag, parsed[0], parsed[1]

@@ -28,14 +28,16 @@ python "<this skill>/scripts/tapir.py" doctor
 Use `python3` on macOS, `py -3` on Windows when `python` is missing. With no Python at all, ask the user to install
 Python 3 (python.org, or `winget install Python.Python.3.13`), then try `py -3` - it finds the new Python without a
 restart; if `py` is not found either, ask the user to restart the agent: a running agent keeps the PATH it started
-with. Every `[!!]` line says what to do:
+with. On macOS, python.org's Python downloads nothing (CERTIFICATE_VERIFY_FAILED) until the user runs its
+`Install Certificates.command` (in its folder in Applications) once. Every `[!!]` line says what to do:
 
-- **No Archicad listens** - ask the user to start Archicad and open a project, or run `tapir.py open <project.pln>`.
-  Archicad runs commands only once a project is open. On a dialog before that (such as "This project is in use") it
-  may already listen and answer error 4001 "no open project": `doctor` then names the window, as below.
-- **Archicad runs but answers on no port**, or **with no project open** - it is still starting, or a dialog waits
-  (project recovery, a project in use, licence); on Windows `doctor` names the window. Tell the user what it shows and
-  let them answer it; never start a second Archicad.
+- **No Archicad listens** - ask the user to start Archicad and open a project, or run `tapir.py open <project.pln>`
+  in the background (section 4: it waits up to 15 minutes). Archicad runs commands only once a project is open. On a
+  dialog before that (such as "This project is in use") it may already listen and answer error 4001 "no open
+  project": `doctor` then names the window, as below.
+- **Archicad runs but answers on no port**, or **with no project open** - it is still starting ('no window yet': wait
+  a minute and run `doctor` again), or a dialog waits (project recovery, a project in use, licence); on Windows
+  `doctor` names the window. Tell the user what it shows and let them answer it; never start a second Archicad.
 - **Archicad crashed** (a call ends in "dropped the connection", or `doctor` names the Bug Reporter) - tell the user
   at once: changes since the last save are gone unless Project Recovery restores them at the next start. Do not send
   the command that was running again.
@@ -55,7 +57,9 @@ with. Every `[!!]` line says what to do:
   blocks 127.0.0.1 too, and every port looks closed. Run `tapir.py` with network access (in Codex: approve running it
   outside the sandbox, or set `network_access = true` under `[sandbox_workspace_write]`), then `doctor` again.
 
-Run `doctor` again until it prints `ready`. `install` and `help` need github.com (behind a proxy, set `HTTPS_PROXY`).
+Run `doctor` again until it prints `ready`. `install` and `help` download from github.com and
+raw.githubusercontent.com, Tapir's installer also from release-assets.githubusercontent.com: a network that blocks
+one fails there (behind a proxy, set `HTTPS_PROXY`; CERTIFICATE_VERIFY_FAILED on macOS: see above).
 
 ## 2. Run commands
 
@@ -130,7 +134,10 @@ the keys you asked for.
 `success: true` - for a whole command, or per element in `executionResults` - only means nothing failed, not that
 anything changed. After every change, read the model again and compare it with what was expected:
 
-- counts: `GetElementsByType` per type, split by story through the `floorIndex` of `GetDetailsOfElements`
+- counts: `GetElementsByType` per type, split by story through the `floorIndex` of `GetDetailsOfElements` - it is
+  the `index` of a story in `GetStories`, so match on it: with stories below ground the list starts at a negative
+  index and `stories[floorIndex]` names the wrong story without an error. A story's `name` can be empty: show its
+  index and level too.
 - values: `GetDetailsOfElements` (geometry, layer, story; `fields` limits the output and the time it takes),
   `GetPropertyValuesOfElements`, `GetClassificationsOfElements`, `Get3DBoundingBoxes`
 - what the user sees: `GetSelectedElements`, `GetCurrentWindowType`, `HighlightElements`
@@ -162,7 +169,8 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
 - `open` on a large project takes minutes and waits up to 15 minutes (`--wait`, default 900 s); `quit` up to about 4
   (give it a 5-minute tool timeout). Run `open` in the background - an agent's tool call is usually cut off sooner,
   and a foreground one shows nothing until it returns - and let it end by itself. Meanwhile read its output, or run
-  `doctor`, about every minute: `open` prints each window once, when it appears, then waits silently, so a dialog line
+  `doctor`, about every minute (wait with the agent's own monitor or background-wait feature, not a foreground sleep -
+  some agents refuse one): `open` prints each window once, when it appears, then waits silently, so a dialog line
   means Archicad waits for the user - tell them at once. If a tool call was cut off anyway, Archicad keeps starting -
   run `doctor`, not `open` again. On Windows `open` prints the windows Archicad shows meanwhile: 'Archicad NN',
   '<name> - Archicad NN' or 'Untitled - Archicad NN' is its main window, also with a docked palette's label after it

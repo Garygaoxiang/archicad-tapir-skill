@@ -93,20 +93,23 @@ PowerShell type `npx.cmd`), or in a Claude Code terminal session (needs git; the
 is not available: use npx or the copy)
 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill` then `/plugin install archicad-tapir@archicad-tapir-skill`,
 or in Codex `$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir`,
-or, with no git, take Code > Download ZIP on GitHub and copy its `skills/archicad-tapir` into `~/.claude/skills/`
-(Claude Code; `%USERPROFILE%\.claude\skills\` on Windows) or `~/.agents/skills/` (Codex). Get git with
+or, with no git, use Codex (its installer downloads a ZIP) or take Code > Download ZIP on GitHub and copy its
+`skills/archicad-tapir` into `~/.claude/skills/` (Claude Code; `%USERPROFILE%\.claude\skills\` on Windows) or
+`~/.agents/skills/` (Codex). Get git with
 `winget install Git.Git` or from git-scm.com, then restart the terminal and the agent. Installing
 Tapir asks for administrator rights when the Add-Ons folder needs them (UAC on Windows, a password dialog on macOS).
 Restart the agent, then ask it to check the Archicad setup: it runs `doctor` and follows each `[!!]` line until
 doctor prints `ready` (the first restart of Archicad after installing Tapir is yours: `tapir.py quit` needs Tapir
 loaded). The script also runs by hand
-(`python tapir.py doctor | install | help | call | quit | open | dbwin`; command list above). Codex's default sandbox cuts the network, 127.0.0.1 included: let the agent run `tapir.py` outside the
+(`python tapir.py doctor | install | help | call | quit | open | dbwin`; `python tapir.py --help` lists them). Codex's default sandbox cuts the network, 127.0.0.1 included: let the agent run `tapir.py` outside the
 sandbox (or set `network_access = true` under `[sandbox_workspace_write]` in `config.toml`).
 
-Update (nothing updates by itself; restart the agent afterwards): `npx skills update archicad-tapir -g`; in Claude Code
-`claude plugin update archicad-tapir@archicad-tapir-skill` where the Claude Code command line is installed (or
-`/plugin` > Marketplaces > Enable auto-update); in Codex remove `~/.codex/skills/archicad-tapir` first, since the
-installer refuses an existing folder, then install again; a manual copy is replaced by copying again.
+Update (nothing updates by itself; restart the agent afterwards): `npx skills update archicad-tapir -g`; in a Claude
+Code session `/plugin` > Installed > archicad-tapir > Update now, or, where the Claude Code command line is
+installed, `claude plugin update archicad-tapir@archicad-tapir-skill`; to update automatically from then on,
+`/plugin` > Marketplaces > archicad-tapir-skill > Enable auto-update (it takes effect from a later session start); in
+Codex remove `~/.codex/skills/archicad-tapir` first, since the installer refuses an existing folder, then install
+again; a manual copy is replaced by copying again.
 
 Tapir is made by [ENZYME-APD](https://github.com/ENZYME-APD) and its contributors; this repository only drives it.
 MIT licence.

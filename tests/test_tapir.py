@@ -511,6 +511,76 @@ if tapir.WINDOWS:
         for name, value in saved.items():
             setattr(tapir, name, value)
 
+# the latest tag comes from where github.com/<repo>/releases/latest redirects, not from the API: doctor runs often and
+# the API's anonymous limit is 60 requests an hour per public address
+class Redirected:
+    def __init__(self, url):
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+urlopen, asked = tapir.urllib.request.urlopen, []
+redirect = ["https://github.com/%s/releases/tag/1.7.2" % tapir.REPO]
+tapir.urllib.request.urlopen = lambda request, timeout=None: asked.append(request.full_url) or Redirected(redirect[0])
+try:
+    assert tapir.latest_tapir() == "1.7.2" and "api.github.com" not in asked[0], asked
+    redirect[0] = "https://github.com/%s/releases" % tapir.REPO           # no release: not taken for a tag
+    try:
+        tapir.latest_tapir()
+        raise AssertionError("a redirect to no release should raise")
+    except OSError as e:
+        assert "not a release" in str(e), e
+finally:
+    tapir.urllib.request.urlopen = urlopen
+
+# GitHub out of reach (offline, a proxy, a limit): install and help say so in one line, no traceback
+latest = tapir.latest_tapir
+tapir.latest_tapir = lambda: (_ for _ in ()).throw(urllib.error.HTTPError("u", 403, "rate limit exceeded", {}, None))
+try:
+    for args in (["install", "--dryRun"], ["help", "--port", str(port)]):     # the fake has no GetAddOnVersion
+        said = exits(tapir.main, args)
+        assert "cannot reach GitHub" in said and "raw.githubusercontent.com" in said, (args, said)
+finally:
+    tapir.latest_tapir = latest
+
+if tapir.WINDOWS:
+    # install's elevated retry starts with the user's stored environment, not the agent's: run.cmd passes the proxy
+    # variables on (% doubled for cmd, a value with a quote left out) and is removed, since it may hold a password
+    scripts, before = [], {name: os.environ.get(name) for name in ("HTTPS_PROXY", "ALL_PROXY")}
+
+    def elevated(command):
+        """as_admin's subprocess.call: runs its run.cmd as the elevated process would, with none of these variables."""
+        script = command[-1].split("-FilePath '")[1].split("' -Verb")[0]
+        with open(script, encoding="utf-8") as f:
+            scripts.append(f.read())
+        return subprocess.call(["cmd", "/c", script],
+                               env={k: v for k, v in os.environ.items() if k.lower() not in tapir.NETWORK})
+
+    saved = tapir.subprocess
+    os.environ["HTTPS_PROXY"], os.environ["ALL_PROXY"] = "http://me:p%40ss&w^@proxy:3128", 'say "no"'
+    tapir.subprocess = types.SimpleNamespace(call=elevated, list2cmdline=subprocess.list2cmdline)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            assert tapir.as_admin([sys.executable, "-I", "-c", "import os; print(os.environ.get('HTTPS_PROXY'))"]) == 0
+        assert '@set "HTTPS_PROXY=http://me:p%%40ss&w^@proxy:3128"' in scripts[0] and "ALL_PROXY" not in scripts[0], \
+            scripts
+        assert said.getvalue().strip() == "http://me:p%40ss&w^@proxy:3128", said.getvalue()
+        assert not os.path.exists(scripts[0].split('> "')[1].split('" 2>&1')[0]), scripts   # the log, with run.cmd
+    finally:
+        tapir.subprocess = saved
+        for name, value in before.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+
 server.shutdown()
 shutil.rmtree(folder, ignore_errors=True)
 assert not launched, launched
