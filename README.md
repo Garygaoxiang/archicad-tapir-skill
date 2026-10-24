@@ -4,7 +4,7 @@
 连上正在运行的 Archicad，查询、修改、验收模型。[English below](#english)
 
 - **检查环境**：Python、Windows 代码页、已装的 Archicad、正在运行的实例、Tapir 是否加载、是否最新版
-- **自动安装 / 更新 Tapir**：调用 Tapir 官方安装器，下载与 Archicad 版本对应的最新版（需要管理员时弹 UAC）
+- **自动安装 / 更新 Tapir**：调用 Tapir 官方安装器，下载与 Archicad 版本对应的最新版（需要管理员权限时，Windows 弹 UAC，macOS 弹密码框）
 - **调用命令**：Tapir 的数百条命令、Archicad 自带的 `API.*` 命令、你自己插件注册的 JSON 命令；
   `help` 直接给出所装 Tapir 版本的命令清单、参数和返回值 schema
 - **开发验收**：退出 Archicad（不保存）→ 重新编译插件 → 带项目重启 → 触发插件命令 → 回读模型逐项核对；
@@ -20,12 +20,23 @@ Archicad 的 JSON 端口没有密码，而且可能接受其他电脑的连接�
 
 | Agent | 做法 |
 |---|---|
-| 任意（自动识别本机装了哪些 agent） | `npx skills add Garygaoxiang/archicad-tapir-skill -g` |
+| 任意（自动识别本机装了哪些 agent；需要 Node.js 22.20+，在 PowerShell 里写 `npx.cmd`） | `npx skills add Garygaoxiang/archicad-tapir-skill -g` |
 | Claude Code | 在会话里输入 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill`，再 `/plugin install archicad-tapir@archicad-tapir-skill` |
 | Codex | 对 Codex 说：`$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir` |
 | 手动 | 把 `skills/archicad-tapir` 整个文件夹拷进 `~/.claude/skills/`（Claude Code）或 `~/.agents/skills/`（Codex） |
 
 装好后重开 agent，对它说「检查一下 Archicad 环境」或「连上 Archicad，数一下每层有几面墙」即可。
+Codex 默认沙箱会断网，连 127.0.0.1 也连不上：让 agent 申请在沙箱外运行 `tapir.py`
+（或在 `config.toml` 的 `[sandbox_workspace_write]` 里设 `network_access = true`）。
+
+**更新**（装好的版本不会自己更新；更新后重开 agent）：
+
+| 安装方式 | 更新 |
+|---|---|
+| npx | `npx skills update archicad-tapir -g` |
+| Claude Code | `/plugin` → Installed → archicad-tapir → Update now，或在终端 `claude plugin update archicad-tapir@archicad-tapir-skill`；想自动更新：`/plugin` → Marketplaces → archicad-tapir-skill → Enable auto-update |
+| Codex | 安装器遇到已存在的目录会中止：先删掉 `~/.codex/skills/archicad-tapir`，再说一次同样的安装命令 |
+| 手动 | 删掉旧的 `archicad-tapir` 文件夹，重新拷一次 |
 
 ## 第一次用
 
@@ -51,9 +62,9 @@ python tapir.py doctor                          检查环境
 python tapir.py install [--versions 28]         安装 / 更新 Tapir（官方安装器，最新版）
 python tapir.py help [命令名]                    列出命令，或看某条命令的参数和返回值
 python tapir.py call GetElementsByType elementType=Wall
-python tapir.py call MyAddOn/RunCheck @params.json --out result.json
+python tapir.py call MyAddOn/RunCheck "@params.json" --out result.json
 python tapir.py quit                            退出 Archicad：不保存、不询问，未保存的修改会丢失（要保留先保存）
-python tapir.py open 项目.pln --exe Archicad.exe 带项目启动并等到它就绪
+python tapir.py open 项目.pln                    带项目启动并等到它就绪（用 .pln 关联的 Archicad；指定版本加 --exe "C:\Program Files\GRAPHISOFT\Archicad 28\Archicad.exe"，写完整路径）
 python tapir.py dbwin --out dbwin.log           Windows：抓插件的调试输出
 ```
 
@@ -69,12 +80,23 @@ own add-ons' JSON commands (with each command's schema on hand through `help`), 
 asking: unsaved changes are lost) and restarts it on a project for add-on rebuilds, captures a C++ add-on's debug
 output on Windows, and lists the traps that fail silently. Python 3.8+ standard library only; Windows and macOS;
 Archicad 25 or later. The agent has to run on the machine Archicad runs on. Archicad's JSON port has no password and
-can accept connections from other computers: keep the firewall blocking incoming connections to Archicad.
+can accept connections from other computers: keep the firewall blocking incoming connections to Archicad (if Windows
+asks when Archicad first starts, do not allow it); the skill uses only 127.0.0.1, which the firewall does not filter.
 
-Install: `npx skills add Garygaoxiang/archicad-tapir-skill -g` (any agent), or in Claude Code
+Install: `npx skills add Garygaoxiang/archicad-tapir-skill -g` (any agent; needs Node.js 22.20+, in PowerShell type
+`npx.cmd`), or in Claude Code
 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill` then `/plugin install archicad-tapir@archicad-tapir-skill`,
 or in Codex `$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir`,
-or copy `skills/archicad-tapir` into the agent's skills folder. Then ask the agent to check the Archicad setup.
+or copy `skills/archicad-tapir` into `~/.claude/skills/` (Claude Code) or `~/.agents/skills/` (Codex). Restart the
+agent, then ask it to check the Archicad setup: it runs `doctor` and follows each `[!!]` line until doctor prints
+`ready`. The script also runs by hand (`python tapir.py doctor | install | help | call | quit | open | dbwin`; command
+list above). Codex's default sandbox cuts the network, 127.0.0.1 included: let the agent run `tapir.py` outside the
+sandbox (or set `network_access = true` under `[sandbox_workspace_write]` in `config.toml`).
+
+Update (nothing updates by itself; restart the agent afterwards): `npx skills update archicad-tapir -g`; in Claude Code
+`claude plugin update archicad-tapir@archicad-tapir-skill` (or `/plugin` > Marketplaces > Enable auto-update); in Codex
+remove `~/.codex/skills/archicad-tapir` first, since the installer refuses an existing folder, then install again;
+a manual copy is replaced by copying again.
 
 Tapir is made by [ENZYME-APD](https://github.com/ENZYME-APD) and its contributors; this repository only drives it.
 MIT licence.

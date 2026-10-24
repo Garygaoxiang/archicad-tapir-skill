@@ -25,15 +25,26 @@ Use `python3` on macOS, `py -3` on Windows when `python` is missing. With no Pyt
 Python 3 (python.org, or `winget install Python.Python.3.13`). Every `[!!]` line says what to do:
 
 - **No Archicad listens** - ask the user to start Archicad and open a project, or run `tapir.py open <project.pln>`.
-  Archicad answers only once a project is open, not on its start dialog.
-- **Archicad runs but answers on no port** - it is still starting, or a dialog waits (project recovery, a project in
-  use, licence); on Windows `doctor` names the window. Tell the user what it shows and let them answer it; never start
-  a second Archicad.
+  Archicad runs commands only once a project is open. On a dialog before that (such as "This project is in use") it
+  may already listen and answer error 4001 "no open project": `doctor` then names the window, as below.
+- **Archicad runs but answers on no port**, or **with no project open** - it is still starting, or a dialog waits
+  (project recovery, a project in use, licence); on Windows `doctor` names the window. Tell the user what it shows and
+  let them answer it; never start a second Archicad.
+- **Archicad crashed** (a call ends in "dropped the connection", or `doctor` names the Bug Reporter) - tell the user
+  at once: changes since the last save are gone unless Project Recovery restores them at the next start. Do not send
+  the command that was running again.
 - **Tapir not loaded** - `tapir.py install` runs Tapir's official installer for every Archicad it finds
   (`--versions 28` for one, `--dryRun` to only show what it would do). For an Archicad under Program Files, Windows
-  shows an administrator prompt: tell the user to click Yes. Archicad has to be restarted to load Tapir.
-- **A newer Tapir is out** - Windows locks loaded add-ons: quit Archicad first (section 4), install, start it again.
+  shows an administrator prompt: tell the user to click Yes. On macOS, when the Add-Ons folder is not writable, a
+  system dialog asks for an administrator's name and password and `install` prints nothing until it is answered: tell
+  the user. Archicad has to be restarted to load Tapir.
+- **A newer Tapir is out** (a `[--]` line; `doctor` still says `ready`) - optional: mention it, and update only if the
+  user wants to. Windows locks loaded add-ons, so then they save, Archicad is quit (section 4), `tapir.py install`,
+  start it again.
 - **Busy** - Archicad runs a long command or shows a dialog, or the user is mid-input. Wait, or ask the user to look.
+- **Connecting to 127.0.0.1 is not allowed** - an agent sandbox that cuts the network (such as Codex's default one)
+  blocks 127.0.0.1 too, and every port looks closed. Run `tapir.py` with network access (in Codex: approve running it
+  outside the sandbox, or set `network_access = true` under `[sandbox_workspace_write]`), then `doctor` again.
 
 Run `doctor` again until it prints `ready`. `install` and `help` need github.com (behind a proxy, set `HTTPS_PROXY`).
 
@@ -44,18 +55,25 @@ tapir.py help                                   # every Tapir command of the ver
 tapir.py help GetDetailsOfElements              # one command: parameters, result, the definitions they use
 tapir.py call GetProjectInfo
 tapir.py call GetElementsByType elementType=Wall
-tapir.py call GetDetailsOfElements @ids.json --out details.json
+tapir.py call GetDetailsOfElements "@ids.json" --out details.json
 tapir.py call API.GetProductInfo                # Archicad's built-in commands
 tapir.py call MyAddOn/RunCheck '{"level": 2}'   # any add-on's own JSON command: Namespace/Name
 ```
 
-- Look the schema up with `help` before writing parameters. A wrong one fails with error 4002, and its message names
-  the path that failed.
-- Parameters: `key=value` pairs (values read as JSON when they parse), inline JSON, `@file.json`, or `-` for stdin.
-  Windows PowerShell 5.1 strips the double quotes out of inline JSON and pipes non-ASCII text as `?`: there, use
-  `key=value` or a UTF-8 `@file.json`.
+- Look the schema up with `help` before writing parameters. A wrong one fails - usually with error 4002, whose message
+  names the path that failed; a wrong enum value may come back with Tapir's own code and message instead, or, in
+  `fields`, not fail at all (below).
+- Parameters: either `key=value` pairs (values read as JSON when they parse) or one JSON object - inline,
+  `"@file.json"` (in double quotes: PowerShell reads a bare `@name` as splatting) or `-` for stdin - not both. Never a
+  bare list (say, a file of element ids): it crashes Archicad, so `tapir.py` refuses it - wrap it as
+  `{"elements": [...]}`. Windows PowerShell 5.1 and cmd.exe strip the double quotes out of inline JSON, and 5.1 pipes
+  non-ASCII text as `?`: there, use `key=value` or a UTF-8 `"@file.json"`.
 - `--out file.json` writes the result as UTF-8 and prints only its outline (list lengths). Use it for anything large;
   PowerShell's `>` would write UTF-16.
+- `tapir.py` prints UTF-8. Piped or captured in PowerShell (`| Select-String`, `$x = ...`, `| ConvertFrom-Json`) or
+  cmd (`| findstr`), non-ASCII names come out wrong - on Chinese or Japanese Windows as plausible but different
+  characters. Put `[Console]::OutputEncoding = [Text.UTF8Encoding]::new();` (PowerShell) or `chcp 65001 >nul &` (cmd)
+  in front of the same command line, or use `--out`.
 - A call waits 600 s for its answer (`--timeout SECONDS`; `call(..., timeout=...)` in Python). A timeout - or the
   agent's own tool timeout, often shorter - only stops the waiting: Archicad finishes the command anyway, and sending
   it again runs it twice (duplicate elements, a move applied twice). Run a long add-on command in the background with
@@ -72,7 +90,7 @@ tapir.py call MyAddOn/RunCheck '{"level": 2}'   # any add-on's own JSON command:
 ```python
 import sys; sys.path.insert(0, r"<this skill>/scripts")
 from tapir import call
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows: a piped stdout uses the ANSI code page
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows: else non-ASCII to a pipe may raise an error
 walls = call("GetElementsByType", {"elementType": "Wall"})["elements"]
 for i in range(0, len(walls), 300):
     batch = {"elements": walls[i:i + 300], "fields": ["floorIndex", "layerIndex"]}
@@ -83,7 +101,11 @@ for i in range(0, len(walls), 300):
 
 List in `fields` only what you read: the others are not computed, which skips the floor plan polygons that take most
 of the time of a batch read (about 9 times faster in one measured case). Without `fields` every field comes back; a
-Tapir version that lacks the parameter rejects it (error 4002).
+Tapir version that lacks the parameter rejects it (error 4002). `fields` takes only the top-level names that
+`help GetDetailsOfElements` lists under ElementDetailsField (type, id, floorIndex, layerIndex, drawIndex, details,
+floorPlanPolygons, hotlinkId). Any other name, such as `thickness`, is not rejected: every element comes back `{}`
+(`--out` counts them as empty). Ask for `details` and read such values out of it, and check that the first result has
+the keys you asked for.
 
 ## 3. Acceptance: trust only what you read back
 
@@ -109,9 +131,11 @@ tapir.py open "C:\Projects\test.pln" --exe "C:\Program Files\GRAPHISOFT\Archicad
 tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
 ```
 
-- `quit` closes Archicad **without saving, and does not ask**: unsaved changes are lost. Ask the user before quitting
-  unless they told you to; to keep their changes they save first (or tell you to `call SaveProject`) - never save
-  their project on your own.
+- `quit` closes Archicad **without saving, and does not ask** (seen on Archicad 28; Tapir calls Archicad's quit
+  differently on 25-27, which may show the save prompt instead - then `quit` ends saying a dialog may wait: tell the
+  user to answer it, do not end Archicad): unsaved changes are lost. Ask the user before quitting unless they told you
+  to; to keep their changes they save first (or tell you to `call SaveProject`) - never save their project on your
+  own.
 - One Archicad at a time: each further one takes the next port (19724, ...; `--port`) and a lot of memory. `open`
   refuses while another one runs - on Windows also one that is still starting or waits on a dialog and has no port
   yet. `call OpenProject projectFilePath=...` switches projects inside a running Archicad, but like `quit` it drops
@@ -119,13 +143,15 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
   dialog the project raises on opening (missing libraries, file conversion) holds the call until someone answers it.
 - `open` on a large project takes minutes: run it in the background, or with a tool timeout of at least 15 minutes.
   If the tool call was cut off, Archicad keeps starting - run `doctor`, not `open` again. On Windows `open` prints the
-  windows Archicad shows meanwhile: a progress window (such as Opening Project) means it is loading; any other is
-  likely a dialog waiting for an answer. After a crash or a forced end expect two in turn: Project Recovery (Cancel
-  goes on without recovering but keeps the recovery data, so it asks again at every start until the data is opened or
-  deleted), then "This project is in use by <you>" - the lock the crash left next to the project, which Open with
-  Exclusive Access is meant for when the name is the user's own and no other Archicad of theirs has the project open;
-  otherwise Don't Open. Also: licence, missing libraries, file conversion. Tell the user what is on screen and let
-  them choose; do not press buttons in their project.
+  windows Archicad shows meanwhile: 'Archicad NN', '<name> - Archicad NN' or 'Untitled - Archicad NN' is its main
+  window and '... Palette' a palette - neither waits for an answer; a progress window (such as Opening Project) means
+  it is loading; a dialog is listed with its text after its title, e.g. `Information: "<file>" This project is in use
+  by <user>` (a bare `Information` is that dialog too). After a crash or a forced end expect two in turn: Project
+  Recovery (Cancel goes on without recovering but keeps the recovery data, so it asks again at every start until the
+  data is opened or deleted), then "This project is in use by <you>" - the lock the crash left next to the project,
+  which Open with Exclusive Access is meant for when the name is the user's own and no other Archicad of theirs has the
+  project open; otherwise Don't Open. Also: licence, missing libraries, file conversion. Tell the user what is on
+  screen and let them choose; do not press buttons in their project.
 - Give the add-on a JSON command for everything worth testing - a class deriving from `API_AddOnCommand`, registered
   in `Initialize()` with `ACAPI_AddOnAddOnCommunication_InstallAddOnCommandHandler` (Archicad 27+;
   `ACAPI_Install_AddOnCommandHandler` before) - so the agent runs it with `call Namespace/Name` instead of a click.
@@ -135,9 +161,11 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
   the background **before** triggering the command, and read the file afterwards. Only one listener can run; it sees
   only lines sent after it started; it drops lines while Archicad is busy (compare a summary count with the detail
   lines); a debugger attached to Archicad takes the lines instead. Diagnostics that matter belong in a file the
-  add-on writes. It runs until stopped: start it with the agent's own background-task feature, and when done stop
-  that task or the pid on its first line (`taskkill /PID <pid> /F`) - never `taskkill /IM python.exe`, which ends
-  every Python on the machine. When it refuses because another listener runs, look for a leftover one:
+  add-on writes. Debug text arrives in the system ANSI code page: characters outside it (e.g. CJK on a Western code
+  page) come through as `?`, so write such diagnostics to a UTF-8 file. It runs until stopped: start it with the
+  agent's own background-task feature, and when done stop that task or the pid on its first line
+  (`taskkill -PID <pid> -F`, the form that works in every shell) - never `taskkill /IM python.exe`, which ends every
+  Python on the machine. When it refuses because another listener runs, look for a leftover one, in PowerShell:
   `Get-CimInstance Win32_Process -Filter "Name like 'python%'" | Where-Object CommandLine -like '*dbwin*'`.
 - Speed (Windows): while Archicad's window is minimised or fully covered (the agent's own window counts), or the
   screen is off, Windows may lower its priority and, on CPUs with efficiency cores, run it on those (power
