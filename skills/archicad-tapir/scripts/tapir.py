@@ -23,6 +23,7 @@ From Python:  sys.path.insert(0, "<this folder>"); from tapir import call
               walls = call("GetElementsByType", {"elementType": "Wall"})["elements"]
 """
 import csv
+import http.client
 import json
 import os
 import platform
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -200,13 +202,26 @@ def fetch(url, timeout=60):
         return response.read()
 
 
+class Unfollowed(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None                                 # the redirect itself names the tag: not the release page too
+
+
+GITHUB = urllib.request.build_opener(Unfollowed)   # still reads HTTPS_PROXY
+
+
 def latest_tapir():
     """The latest release's tag, from where github.com's releases/latest redirects - not from GitHub's API, whose
     anonymous limit (60 requests an hour per public address, an office's shared one) doctor would use up."""
-    request = urllib.request.Request("https://github.com/%s/releases/latest" % REPO, method="HEAD",
+    request = urllib.request.Request("https://github.com/%s/releases/latest" % REPO,
                                      headers={"User-Agent": "archicad-tapir-skill"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        url = response.geturl()
+    try:
+        with GITHUB.open(request, timeout=30) as response:
+            url = response.geturl()
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308):
+            raise
+        url = urllib.parse.urljoin(request.full_url, e.headers.get("Location") or "")
     if "/releases/tag/" not in url:
         raise OSError("github.com answered with %s, not a release" % url)
     return urllib.parse.unquote(url.rstrip("/").rsplit("/", 1)[-1])
@@ -221,6 +236,9 @@ def from_repo(tag, path):
     local = os.path.join(tempfile.gettempdir(), "tapir-" + tag, os.path.basename(path))
     if not os.path.exists(local):
         data = fetch("https://raw.githubusercontent.com/%s/%s/%s" % (REPO, tag, path))
+        if data.lstrip()[:1] in (b"", b"<"):         # nothing, or a proxy's / web filter's own page: not kept
+            raise OSError("received %s instead of %s - blocked by a proxy or web filter?"
+                          % ("a web page" if data.strip() else "nothing", path))
         os.makedirs(os.path.dirname(local), exist_ok=True)
         with open(local, "wb") as f:
             f.write(data)
@@ -356,7 +374,7 @@ def install(options):
     """Tapir's official installer in console mode, its own options passed through."""
     try:
         installer = from_repo(latest_tapir(), INSTALLER)
-    except OSError as e:                           # URLError, HTTPError, a timeout
+    except (OSError, http.client.HTTPException) as e:   # URLError, HTTPError, a timeout, a cut download
         sys.exit(NO_GITHUB % e)
     command = [sys.executable, "-I", "-X", "utf8", installer, "--console"] + options
     done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -384,7 +402,8 @@ def as_admin(command):
                      if k.lower() in NETWORK and not set('"\r\n') & set(v))
     try:
         with open(script, "w", encoding="utf-8") as f:       # chcp first, so that cmd reads the paths as UTF-8
-            f.write('@chcp 65001 >nul\r\n%s@%s > "%s" 2>&1\r\n' % (passed, subprocess.list2cmdline(command), log))
+            f.write('@chcp 65001 >nul\r\n@setlocal DisableDelayedExpansion\r\n%s@%s > "%s" 2>&1\r\n' %
+                    (passed, subprocess.list2cmdline(command), log))
         code = subprocess.call(["powershell", "-NoProfile", "-Command",
                                 "exit (Start-Process -FilePath '%s' -Verb RunAs -Wait -PassThru -WindowStyle Hidden)"
                                 ".ExitCode" % script.replace("'", "''")])
@@ -409,7 +428,7 @@ def tapir_docs(port):
         try:
             tag = tag or latest_tapir()
             local = from_repo(tag, "docs/archicad-addon/" + name)
-        except OSError as e:                       # URLError, HTTPError, a timeout
+        except (OSError, http.client.HTTPException) as e:   # URLError, HTTPError, a timeout, a cut download
             sys.exit(NO_GITHUB % e)
         with open(local, encoding="utf-8") as f:
             text = f.read()
@@ -437,6 +456,12 @@ def show_help(name, port):
     elif name.lstrip("#/") in definitions:
         shown = {"#/" + name.lstrip("#/"): definitions[name.lstrip("#/")]}
     else:
+        found = [c for c in commands.values() if name.lower() in (c["name"] + " " + c["description"]).lower()]
+        for c in found:                            # help <word>: the commands whose name or description has it
+            print("  %-38s %s" % (c["name"], " ".join(c["description"].split()).split(". ")[0]))
+        if found:
+            print("%d commands of Tapir %s mention %s. tapir.py help <Command> shows one." % (len(found), tag, name))
+            return 0
         import difflib
         close = difflib.get_close_matches(name, list(commands) + list(definitions), 6, 0.4)
         print("%s is neither a command nor a definition of Tapir %s. Close: %s" % (name, tag, ", ".join(close) or "-"))
@@ -513,7 +538,7 @@ def quit_archicad(port, wait):
         print("Archicad runs with no project open (%s): %s Its add-ons stay locked until it is gone."
               % (shows(), PORTLESS) if no_project(e) else "Archicad refused to quit: %s" % e)
         return 1
-    except OSError:
+    except (OSError, http.client.HTTPException):
         pass                                       # the connection can drop as Archicad goes away
     deadline = time.time() + wait
     while time.time() < deadline:
@@ -597,7 +622,8 @@ def open_project(path, exe, wait):
     print("starting Archicad on %s - a large project takes minutes%s" % (
         path, "; the windows it shows are listed as they appear" if WINDOWS else ""), flush=True)
     start, shown, alive, seen, gone = time.time(), set(), set(), False, 0
-    while time.time() < start + wait:
+    deadline, before, processes = start + wait, set(), {}
+    while time.time() < deadline:
         time.sleep(5)
         port = project_port(path)
         if port:
@@ -614,15 +640,21 @@ def open_project(path, exe, wait):
                                   " sends the report or closes it." if bug_reporter() else
                                   "it crashed or was closed - ask the user."))
             return 1
+        now = {(pid, re.sub(r"\d+", "#", title)) for pid, titles in processes.items() for title in titles}
+        if before - now:                                     # a window went (a dialog answered): --wait starts again
+            deadline = time.time() + wait
+        before = now
         for pid, titles in processes.items():                # a dialog shows up here long before any port
             for title in titles:
                 key = (pid, re.sub(r"\d+", "#", title))             # a progress text that counts is one window
                 if key not in shown:
                     shown.add(key)
                     print("  %d s: Archicad (pid %d) shows '%s'" % (time.time() - start, pid, title), flush=True)
-    print("Archicad did not answer for the project in %d s. Probably a dialog waits on screen: project recovery (after a"
+    print("Archicad did not answer for the project in %d s%s. Probably a dialog waits on screen: project recovery (after a"
           " crash, or data an earlier Cancel kept), 'This project is in use' (the lock a crash or a forced quit leaves),"
-          " licence, missing libraries, file conversion. Tell the user what it shows." % wait)
+          " licence, missing libraries, file conversion - or, if only a progress window such as Opening Project shows, it"
+          " is still loading: run doctor. Tell the user what it shows." % (
+              time.time() - start, " (%s)" % describe(processes) if processes else ""))
     return 1
 
 
@@ -660,7 +692,8 @@ def dbwin(out):
 
 QUOTES = (" - Windows PowerShell 5.1 and cmd.exe strip the double quotes out of inline JSON (cmd.exe has no single"
           ' quotes either): use key=value for plain values and a UTF-8 "@file.json" for a list or object (in double'
-          ' quotes: PowerShell reads a bare @name as splatting), or write each inner quote as \\"')
+          ' quotes: PowerShell reads a bare @name as splatting), or write each inner quote as \\" (in cmd.exe also'
+          ' put the whole object in double quotes: "{\\"elementType\\": \\"Wall\\"}")')
 
 
 def parameters(args):
@@ -679,11 +712,21 @@ def parameters(args):
         except OSError as e:                       # a missing @file is not a connection problem
             sys.exit("cannot read %s: %s" % (args[0][1:] or "stdin", e.strerror or e))
         except ValueError as e:                    # also a file that is not UTF-8
-            sys.exit("parameters are not valid JSON (%s): %s%s" % (e, args[0], QUOTES))
+            hint = QUOTES if args[0][:1] not in "@-" and '"' not in args[0] else \
+                " - save it as UTF-8 (Windows PowerShell 5.1's > and Out-File write UTF-16)" \
+                if isinstance(e, UnicodeDecodeError) else ""   # quotes that arrived were not stripped
+            sys.exit("parameters are not valid JSON (%s): %s%s" % (e, args[0], hint))
     pairs = {}
     for a in args:
         key, sep, value = a.partition("=")
         if not sep:
+            try:
+                json.loads(a)
+                valid = True
+            except ValueError:
+                valid = False
+            if a.lstrip("'").startswith(("{", "[")) and not valid:   # one object the shell cut at its spaces
+                sys.exit("cannot read parameter %r: the shell split one JSON object at its spaces%s" % (a, QUOTES))
             sys.exit('cannot read parameter %r: give either key=value pairs or one JSON object (inline, "@file.json"'
                      " or - for stdin), not both%s" % (a, QUOTES if "{" in a or "[" in a else ""))
         try:
@@ -772,7 +815,7 @@ def run(command, args):
             result = call(args[0], params, port, timeout)
         except (RuntimeError, ValueError) as e:
             sys.exit(str(e))
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             reason = getattr(e, "reason", e)       # urllib wraps what fails while the request is sent
             if isinstance(reason, PermissionError):
                 sys.exit(SANDBOXED % reason)
@@ -780,7 +823,8 @@ def run(command, args):
                 sys.exit("no answer in %g s - Archicad goes on with the command: do not send it again. When tapir.py"
                          " doctor says ready it has finished; read the model to see what it did. Long commands:"
                          " --timeout SECONDS, run in the background." % timeout)
-            if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                                   http.client.IncompleteRead)):
                 sys.exit("Archicad dropped the connection during %s (%s) - it has most likely crashed (on Windows its"
                          " Bug Reporter opens) or was closed. Do not send the command again: it may be what crashed"
                          " it. %s Then run tapir.py doctor." % (args[0], reason, CRASHED))

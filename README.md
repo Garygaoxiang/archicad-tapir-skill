@@ -21,7 +21,7 @@ Archicad 的 JSON 端口没有密码，而且可能接受其他电脑的连接�
 | Agent | 做法 |
 |---|---|
 | 任意（自动识别本机装了哪些 agent；需要 Node.js 22.20+ 和 git，在 PowerShell 里写 `npx.cmd`） | `npx skills add Garygaoxiang/archicad-tapir-skill -g` |
-| Claude Code（需要 git） | 终端会话里输入 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill`，再 `/plugin install archicad-tapir@archicad-tapir-skill`。桌面版会回复 `/plugin isn't available in this environment`：改用上面的 npx 或下面的手动方式 |
+| Claude Code（需要 git） | 终端会话里输入 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill`，再 `/plugin install archicad-tapir@archicad-tapir-skill`。桌面版会回复 `/plugin isn't available in this environment`：装了 Claude Code 命令行的话，在终端里运行 `claude plugin marketplace add Garygaoxiang/archicad-tapir-skill`，再运行 `claude plugin install archicad-tapir@archicad-tapir-skill`（默认装到用户范围，桌面版的本地会话也会加载，新开会话后生效）；没装命令行，就用上面的 npx 或下面的手动方式 |
 | Codex | 对 Codex 说：`$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir` |
 | 手动（不需要 git） | 在 GitHub 页面点 Code → Download ZIP，把解压出来的 `skills/archicad-tapir` 整个文件夹拷进 `~/.claude/skills/`（Claude Code；Windows 上是 `%USERPROFILE%\.claude\skills\`）或 `~/.agents/skills/`（Codex） |
 
@@ -36,7 +36,7 @@ Codex 默认沙箱会断网，连 127.0.0.1 也连不上：让 agent 申请在�
 | 安装方式 | 更新 |
 |---|---|
 | npx | `npx skills update archicad-tapir -g` |
-| Claude Code | `/plugin` → Installed → archicad-tapir → Update now，或在装了 Claude Code 命令行的终端里 `claude plugin update archicad-tapir@archicad-tapir-skill`；想自动更新：`/plugin` → Marketplaces → archicad-tapir-skill → Enable auto-update |
+| Claude Code | `/plugin` → Installed → archicad-tapir → Update now，或在装了 Claude Code 命令行的终端里 `claude plugin update archicad-tapir@archicad-tapir-skill`；想自动更新：`/plugin` → Marketplaces → archicad-tapir-skill → Enable auto-update（从之后某次启动会话时起生效） |
 | Codex | 安装器遇到已存在的目录会中止：先删掉 `~/.codex/skills/archicad-tapir`，再说一次同样的安装命令 |
 | 手动 | 删掉旧的 `archicad-tapir` 文件夹，重新拷一次 |
 
@@ -90,7 +90,9 @@ incoming connections to Archicad (if Windows asks when Archicad first starts, do
 
 Install: `npx skills add Garygaoxiang/archicad-tapir-skill -g` (any agent; needs Node.js 22.20+ and git, in
 PowerShell type `npx.cmd`), or in a Claude Code terminal session (needs git; the desktop app answers that `/plugin`
-is not available: use npx or the copy)
+is not available: there, where the Claude Code command line is installed, run
+`claude plugin marketplace add Garygaoxiang/archicad-tapir-skill` then `claude plugin install archicad-tapir@archicad-tapir-skill`
+in a terminal - user scope, which the desktop app's local sessions load too - or use npx or the copy)
 `/plugin marketplace add Garygaoxiang/archicad-tapir-skill` then `/plugin install archicad-tapir@archicad-tapir-skill`,
 or in Codex `$skill-installer install https://github.com/Garygaoxiang/archicad-tapir-skill/tree/main/skills/archicad-tapir`,
 or, with no git, use Codex (its installer downloads a ZIP) or take Code > Download ZIP on GitHub and copy its

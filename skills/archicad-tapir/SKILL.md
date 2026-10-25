@@ -67,6 +67,7 @@ one fails there (behind a proxy, set `HTTPS_PROXY`; CERTIFICATE_VERIFY_FAILED on
 tapir.py help                                   # every Tapir command of the version Archicad runs (of the latest
                                                 # release when it does not answer: the last line names the version)
 tapir.py help GetDetailsOfElements              # one command: parameters, result, the definitions they use
+tapir.py help property                          # a word that is no command: the commands that mention it
 tapir.py call GetProjectInfo
 tapir.py call GetElementsByType elementType=Wall
 tapir.py call GetDetailsOfElements "@ids.json" --out details.json
@@ -86,7 +87,7 @@ tapir.py call MyAddOn/RunCheck '{"level": 2}'   # any add-on's own JSON command:
   bare list (say, a file of element ids): it crashes Archicad, so `tapir.py` refuses it - wrap it as
   `{"elements": [...]}`. Windows PowerShell 5.1 and cmd.exe strip the double quotes out of inline JSON, and 5.1 pipes
   non-ASCII text as `?`: there, use `key=value` for plain values and a UTF-8 `"@file.json"` for a list or object (or
-  write each inner quote as `\"`).
+  write each inner quote as `\"`; in cmd.exe also put the whole object in double quotes: `"{\"elementType\": \"Wall\"}"`).
 - `--out file.json` writes the result as UTF-8 and prints only its outline (list lengths, with how many items are
   empty or failed - open the file for their messages). Use it for anything large; PowerShell's `>` would write UTF-16.
 - `tapir.py` prints UTF-8. Piped or captured in PowerShell (`| Select-String`, `$x = ...`, `| ConvertFrom-Json`) or
@@ -108,6 +109,10 @@ tapir.py call MyAddOn/RunCheck '{"level": 2}'   # any add-on's own JSON command:
   `{"error": {...}}` instead of its data, even where `help` does not say so - check before reading its fields. In
   property and classification reads (`GetPropertyValuesOfElements`, `GetClassificationsOfElements`) one value of an
   element fails the same way, one level down. Send element lists in batches of a few hundred.
+
+Result schemas in `help` are Tapir's documentation, not always what it sends: print one raw result before writing a
+parser. In `GetClassificationsOfElements`, values are `{"classificationSystemId": ..., "classificationItemId": ...}`
+without the `classificationId` wrapper shown by help (Tapir 1.7.2); `SetClassificationsOfElements` still wants the wrapper.
 
 ```python
 import sys; sys.path.insert(0, r"<this skill>/scripts")
@@ -139,8 +144,16 @@ anything changed. After every change, read the model again and compare it with w
   index and `stories[floorIndex]` names the wrong story without an error. A story's `name` can be empty: show its
   index and level too.
 - values: `GetDetailsOfElements` (geometry, layer, story; `fields` limits the output and the time it takes),
-  `GetPropertyValuesOfElements`, `GetClassificationsOfElements`, `Get3DBoundingBoxes`
-- what the user sees: `GetSelectedElements`, `GetCurrentWindowType`, `HighlightElements`
+  `GetPropertyValuesOfElements`, `GetClassificationsOfElements`, `Get3DBoundingBoxes`. `GetClassificationsOfElements`
+  needs `classificationSystemIds`, which no Tapir command lists: read them with Archicad's built-in
+  `API.GetAllClassificationSystems`; an item's code and name come from `API.GetDetailsOfClassificationItems`.
+  `tapir.py help` covers Tapir's commands only. Property names in `GetAllProperties` are localized and can repeat:
+  choose by guid, and get a built-in property's guid in any language with `call API.GetPropertyIds` and
+  `{"properties": [{"type": "BuiltIn", "nonLocalizedName": "General_ElementID"}]}`. Property values are display
+  strings in project units and decimals; compare at that precision, and take geometry from `GetDetailsOfElements`.
+- what the user sees: `GetSelectedElements`, `GetCurrentWindowType`. To point the user at elements,
+  `HighlightElements` takes one `[r, g, b, a]` per element; `elements=[] highlightedColors=[]` clears it. It changes
+  only the display and is not a check.
 
 Report the numbers before and after and every difference, not a sample. When Archicad was reopened, first check that
 the previous result is still there - a project that was not saved has lost it.
@@ -168,7 +181,10 @@ tapir.py call MyAddOn/RunCheck        # then check the model as in section 3
   dialog the project raises on opening (missing libraries, file conversion) holds the call until someone answers it.
 - `open` on a large project takes minutes and waits up to 15 minutes (`--wait`, default 900 s); `quit` up to about 4
   (give it a 5-minute tool timeout). Run `open` in the background - an agent's tool call is usually cut off sooner,
-  and a foreground one shows nothing until it returns - and let it end by itself. Meanwhile read its output, or run
+  and a foreground one shows nothing until it returns - and let it end by itself. From PowerShell, start it from
+  Python (`Start-Process -ArgumentList` splits a path with spaces) and read the UTF-8 `open.log` it writes:
+  `python -c "import subprocess, sys; subprocess.Popen([sys.executable, r'<tapir.py>', 'open', r'<project.pln>', '--exe', r'<Archicad.exe>'], stdout=open('open.log', 'w'), stderr=subprocess.STDOUT)"`.
+  Meanwhile read its output, or run
   `doctor`, about every minute (wait with the agent's own monitor or background-wait feature, not a foreground sleep -
   some agents refuse one): `open` prints each window once, when it appears, then waits silently, so a dialog line
   means Archicad waits for the user - tell them at once. If a tool call was cut off anyway, Archicad keeps starting -

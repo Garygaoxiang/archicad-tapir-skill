@@ -1,5 +1,6 @@
 """Checks tapir.py against a fake Archicad JSON port - no Archicad needed.  python tests/test_tapir.py"""
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -125,6 +126,8 @@ class Out(io.StringIO):
 
 assert "PowerShell" in exits(tapir.parameters, ["{elementType: Wall}"])     # inline JSON with its quotes stripped
 assert "cmd.exe" in exits(tapir.parameters, ["'{level:", "2}'"])             # and as cmd.exe splits it
+split = exits(tapir.parameters, ['{"elementType":', '"Column"}'])
+assert "split one JSON object" in split and "not both" not in split
 assert "not both" in exits(tapir.parameters, ["@x.json", "a=1"])
 assert "needs a value" in exits(tapir.main, ["call", "Run", "--out"])
 assert "needs a number" in exits(tapir.main, ["call", "Run", "--port", "x"])
@@ -144,7 +147,27 @@ assert tapir.parameters(['{"elements": []}']) == {"elements": []}
 with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8-sig", delete=False) as f:
     f.write('{"name": "图层"}')
 assert tapir.parameters(["@" + f.name]) == {"name": "图层"}
+# a JSON mistake whose quotes arrived is not blamed on the shell; a file that is not UTF-8 says so
+assert "strip" not in exits(tapir.parameters, ['{"elementType": "Wall",}'])
+with open(f.name, "w", encoding="utf-8") as g:
+    g.write('{"elementType": "Wall",}')
+assert "strip" not in exits(tapir.parameters, ["@" + f.name])
+with open(f.name, "w", encoding="utf-16") as g:
+    g.write('{"elementType": "Wall"}')
+assert "UTF-8" in exits(tapir.parameters, ["@" + f.name])
 os.remove(f.name)
+
+# help searches command names and descriptions when the query is not itself a command
+docs = tapir.tapir_docs
+tapir.tapir_docs = lambda port: ("1.7.2", [{"name": "Elements", "commands": [
+    {"name": "GetPropertyValuesOfElements", "description": "Read property values."},
+    {"name": "GetElementsByType", "description": "Read elements."}]}], {})
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        assert tapir.show_help("property", port) == 0
+    assert "GetPropertyValuesOfElements" in said.getvalue()
+finally:
+    tapir.tapir_docs = docs
 
 # a @file that cannot be read is not a connection problem, and nothing is sent
 count = len(seen)
@@ -193,6 +216,22 @@ assert tapir.outline({"propertyValuesForElements": [{"propertyValues": [{"error"
 unsupported = {"type": "Dimension", "details": {"error": "Not yet supported element type"}}
 assert tapir.outline({"detailsOfElements": [unsupported]}) == {"detailsOfElements": "1 items"}
 assert tapir.numbers("1.7.0") < tapir.numbers("1.7.1") < tapir.numbers("1.10.0")
+
+# an empty or HTML download is not cached as a Tapir file
+repo_tag = "test-cache-validation"
+repo_dir = os.path.join(tempfile.gettempdir(), "tapir-" + repo_tag)
+shutil.rmtree(repo_dir, ignore_errors=True)
+fetch = tapir.fetch
+tapir.fetch = lambda *args, **kwargs: b""
+try:
+    try:
+        tapir.from_repo(repo_tag, "docs.json")
+        raise AssertionError("empty download should fail")
+    except OSError as e:
+        assert "received nothing" in str(e), e
+finally:
+    tapir.fetch = fetch
+    shutil.rmtree(repo_dir, ignore_errors=True)
 
 # an Archicad that runs without a port (still starting, or a dialog waits): doctor, quit and open must not take it
 # for "no Archicad", and open must not start a second one
@@ -326,6 +365,26 @@ finally:
     for name, value in saved.items():
         setattr(tapir, name, value)
 
+# open gives a fresh wait after a dialog closes
+clock[0] = 0.0
+state = {"started": False}
+saved = {name: getattr(tapir, name) for name in ("archicads", "archicad_windows", "project_port", "time", "subprocess")}
+tapir.archicads = lambda: [1] if state["started"] else []
+tapir.project_port = lambda *args: None
+tapir.time = types.SimpleNamespace(time=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+polls = [{}, {5: ["Dialog"]}, {}, {5: ["Dialog"]}, {5: ["Dialog"]}]
+tapir.archicad_windows = lambda: polls.pop(0) if polls else {5: ["Dialog"]}
+tapir.subprocess = types.SimpleNamespace(
+    run=lambda *args, **kwargs: (state.__setitem__("started", True) or types.SimpleNamespace(returncode=0)),
+    Popen=lambda *args, **kwargs: state.__setitem__("started", True))
+try:
+    with contextlib.redirect_stdout(io.StringIO()) as said:
+        assert tapir.open_project(os.path.abspath(__file__), None, 10) == 1
+    assert "20 s" in said.getvalue() and "did not answer" in said.getvalue(), said.getvalue()
+finally:
+    for name, value in saved.items():
+        setattr(tapir, name, value)
+
 # Archicad busy (no answer in time): quit must not send a quit that would run later, open must not call it "another
 # project" and suggest quitting it
 sent = []
@@ -394,6 +453,15 @@ threading.Thread(target=drop, daemon=True).start()
 dropped = exits(tapir.main, ["call", "Run", "--port", str(crash.getsockname()[1])])
 assert "crashed" in dropped and "Do not send the command again" in dropped, dropped
 crash.close()
+
+# a truncated HTTP response is handled like a dropped Archicad connection
+saved_call = tapir.call
+tapir.call = lambda *args, **kwargs: (_ for _ in ()).throw(http.client.IncompleteRead(b"partial"))
+try:
+    dropped = exits(tapir.main, ["call", "Run", "--port", str(port)])
+    assert "dropped the connection" in dropped and "Do not send the command again" in dropped, dropped
+finally:
+    tapir.call = saved_call
 
 if tapir.WINDOWS:
     # a dialog is listed with its text, read without sending it a message (the child below never pumps any)
@@ -511,27 +579,19 @@ if tapir.WINDOWS:
         for name, value in saved.items():
             setattr(tapir, name, value)
 
-# the latest tag comes from where github.com/<repo>/releases/latest redirects, not from the API: doctor runs often and
-# the API's anonymous limit is 60 requests an hour per public address
-class Redirected:
-    def __init__(self, url):
-        self.url = url
-
-    def geturl(self):
-        return self.url
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
+# the latest tag comes from the redirect's Location, not the release page or the API: doctor runs often and the API's
+# anonymous limit is 60 requests an hour per public address
+def answer(request, timeout=None):       # a 302, as Unfollowed leaves it: the release page is not asked for
+    asked.append(request.full_url)
+    assert request.get_method() == "GET"
+    raise urllib.error.HTTPError(request.full_url, 302, "Found", {"Location": redirect[0]}, None)
 
 
-urlopen, asked = tapir.urllib.request.urlopen, []
+urlopen, asked = tapir.GITHUB.open, []
 redirect = ["https://github.com/%s/releases/tag/1.7.2" % tapir.REPO]
-tapir.urllib.request.urlopen = lambda request, timeout=None: asked.append(request.full_url) or Redirected(redirect[0])
+tapir.GITHUB.open = answer
 try:
-    assert tapir.latest_tapir() == "1.7.2" and "api.github.com" not in asked[0], asked
+    assert tapir.latest_tapir() == "1.7.2" and len(asked) == 1 and "api.github.com" not in asked[0], asked
     redirect[0] = "https://github.com/%s/releases" % tapir.REPO           # no release: not taken for a tag
     try:
         tapir.latest_tapir()
@@ -539,7 +599,7 @@ try:
     except OSError as e:
         assert "not a release" in str(e), e
 finally:
-    tapir.urllib.request.urlopen = urlopen
+    tapir.GITHUB.open = urlopen
 
 # GitHub out of reach (offline, a proxy, a limit): install and help say so in one line, no traceback
 latest = tapir.latest_tapir
@@ -558,24 +618,29 @@ if tapir.WINDOWS:
 
     def elevated(command):
         """as_admin's subprocess.call: runs its run.cmd as the elevated process would, with none of these variables."""
-        script = command[-1].split("-FilePath '")[1].split("' -Verb")[0]
+        script = command[-1].split("-FilePath '")[1].split("' -Verb")[0].replace("''", "'")
         with open(script, encoding="utf-8") as f:
             scripts.append(f.read())
         return subprocess.call(["cmd", "/c", script],
                                env={k: v for k, v in os.environ.items() if k.lower() not in tapir.NETWORK})
 
     saved = tapir.subprocess
+    saved_mkdtemp = tapir.tempfile.mkdtemp
+    admin_folder = os.path.join(folder, "O'Brien")
+    tapir.tempfile.mkdtemp = lambda prefix: (os.makedirs(admin_folder, exist_ok=True) or admin_folder)
     os.environ["HTTPS_PROXY"], os.environ["ALL_PROXY"] = "http://me:p%40ss&w^@proxy:3128", 'say "no"'
     tapir.subprocess = types.SimpleNamespace(call=elevated, list2cmdline=subprocess.list2cmdline)
     try:
         with contextlib.redirect_stdout(io.StringIO()) as said:
             assert tapir.as_admin([sys.executable, "-I", "-c", "import os; print(os.environ.get('HTTPS_PROXY'))"]) == 0
+        assert '@setlocal DisableDelayedExpansion' in scripts[0]
         assert '@set "HTTPS_PROXY=http://me:p%%40ss&w^@proxy:3128"' in scripts[0] and "ALL_PROXY" not in scripts[0], \
             scripts
         assert said.getvalue().strip() == "http://me:p%40ss&w^@proxy:3128", said.getvalue()
         assert not os.path.exists(scripts[0].split('> "')[1].split('" 2>&1')[0]), scripts   # the log, with run.cmd
     finally:
         tapir.subprocess = saved
+        tapir.tempfile.mkdtemp = saved_mkdtemp
         for name, value in before.items():
             os.environ.pop(name, None)
             if value is not None:
